@@ -52,24 +52,18 @@ class TestProviderSelection:
         )
         assert rec.provider == "openai"
 
-    def test_available_providers_falls_back_when_forced_unavailable(self, selector):
-        """Forced provider requirements should fall back if unavailable."""
+    def test_4k_shorthand_can_route_to_openai(self, selector):
+        """4K is no longer a hard Gemini requirement for gpt-image-2."""
         rec = selector.suggest_provider(
-            "A sunset",
+            "A poster with headline text",
             size="4K",
-            available_providers=["openai"],
+            available_providers=["openai", "gemini"],
         )
         assert rec.provider == "openai"
 
     def test_reference_images_require_gemini(self, selector):
         """Reference images should force Gemini."""
         rec = selector.suggest_provider("A simple cat", reference_images=["base64encodedimage"])
-        assert rec.provider == "gemini"
-        assert rec.confidence == 1.0
-
-    def test_4k_requires_gemini(self, selector):
-        """4K resolution should force Gemini."""
-        rec = selector.suggest_provider("A sunset", size="4K")
         assert rec.provider == "gemini"
         assert rec.confidence == 1.0
 
@@ -151,57 +145,42 @@ class TestFallbackBehavior:
         assert "OPENAI_API_KEY" in rec.fallback_notice
         assert rec.preferred_provider == "openai"
 
-    def test_hard_fallback_for_reference_images(self, selector):
-        """Reference images require Gemini; fallback should warn about missing feature."""
-        rec = selector.suggest_provider(
-            "A cat in the style of my reference",
-            reference_images=["base64data"],
-            available_providers=["openai"],
-        )
-        assert rec.provider == "openai"
-        assert rec.is_fallback is True
-        assert rec.fallback_notice is not None
-        assert "reference images" in (rec.fallback_notice or "").lower() or rec.missing_features
-        assert rec.preferred_provider == "gemini"
+    def test_hard_requirement_reference_images_fails_closed(self, selector):
+        """Reference inputs must never be silently dropped on another provider."""
+        with pytest.raises(ValueError, match="Hard feature requirements never fall back"):
+            selector.suggest_provider(
+                "A cat in the style of my reference",
+                reference_images=["base64data"],
+                available_providers=["openai"],
+            )
 
-    def test_hard_fallback_for_4k(self, selector):
-        """4K requires Gemini; fallback should note the limitation."""
+    def test_4k_is_not_reported_as_missing_on_openai(self, selector):
+        """OpenAI maps the shorthand to a valid near-4K custom size."""
         rec = selector.suggest_provider(
-            "A sunset",
+            "A poster with headline text",
             size="4K",
             available_providers=["openai"],
         )
         assert rec.provider == "openai"
-        assert rec.is_fallback is True
-        assert rec.fallback_notice is not None
-        assert rec.preferred_provider == "gemini"
-        assert rec.missing_features is not None
-        assert any("4K" in f for f in rec.missing_features)
+        assert not rec.missing_features
 
-    def test_hard_fallback_for_google_search(self, selector):
-        """Google Search requires Gemini; fallback should note the limitation."""
-        rec = selector.suggest_provider(
-            "Current weather in NYC",
-            enable_google_search=True,
-            available_providers=["openai"],
-        )
-        assert rec.provider == "openai"
-        assert rec.is_fallback is True
-        assert rec.missing_features is not None
-        assert any("Google Search" in f for f in rec.missing_features)
+    def test_hard_requirement_google_search_fails_closed(self, selector):
+        """Grounding requests must never run ungrounded on another provider."""
+        with pytest.raises(ValueError, match="Hard feature requirements never fall back"):
+            selector.suggest_provider(
+                "Current weather in NYC",
+                enable_google_search=True,
+                available_providers=["openai"],
+            )
 
-    def test_explicit_provider_fallback(self, selector):
-        """Explicit provider that's unavailable should produce a clear fallback notice."""
-        rec = selector.suggest_provider(
-            "A sunset",
-            explicit_provider="gemini",
-            available_providers=["openai"],
-        )
-        assert rec.provider == "openai"
-        assert rec.is_fallback is True
-        assert rec.fallback_notice is not None
-        assert "gemini" in rec.fallback_notice.lower()
-        assert "GEMINI_API_KEY" in rec.fallback_notice
+    def test_explicit_provider_pin_fails_closed(self, selector):
+        """An explicit vendor choice must never silently cross providers."""
+        with pytest.raises(ValueError, match="explicit provider pins never fall back"):
+            selector.suggest_provider(
+                "A sunset",
+                explicit_provider="gemini",
+                available_providers=["openai"],
+            )
 
     def test_no_fallback_when_preferred_is_available(self, selector):
         """When both providers are available, no fallback notice should appear."""

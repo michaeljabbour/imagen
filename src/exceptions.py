@@ -11,6 +11,10 @@ import re
 
 def _sanitize_message(msg: str) -> str:
     """Remove potential credentials from error messages."""
+    # OpenAI keys have changed shape over time (for example ``sk-proj-...``),
+    # so redact the stable prefix even when a truncated key appears in an
+    # upstream exception.
+    msg = re.sub(r"\bsk-[A-Za-z0-9_-]{8,}", "[REDACTED]", msg)
     # Strip long alphanumeric strings that could be API keys
     msg = re.sub(r"[A-Za-z0-9_-]{32,}", "[REDACTED]", msg)
     # Strip URL query params that might contain keys
@@ -39,11 +43,17 @@ class ProviderError(ImagenError):
         *,
         provider: str,
         status_code: int | None = None,
+        code: str | None = None,
+        request_id: str | None = None,
+        retryable: bool = False,
         user_message: str | None = None,
     ) -> None:
         super().__init__(message, user_message=user_message)
         self.provider = provider
         self.status_code = status_code
+        self.code = code
+        self.request_id = request_id
+        self.retryable = retryable
 
 
 class AuthenticationError(ProviderError):
@@ -60,12 +70,16 @@ class RateLimitError(ProviderError):
         retry_after: float | None = None,
         provider: str,
         status_code: int | None = None,
+        request_id: str | None = None,
         user_message: str | None = None,
     ) -> None:
         super().__init__(
             message,
             provider=provider,
             status_code=status_code,
+            code="rate_limit_exceeded",
+            request_id=request_id,
+            retryable=True,
             user_message=user_message or "Rate limit exceeded. Please wait and try again.",
         )
         self.retry_after = retry_after

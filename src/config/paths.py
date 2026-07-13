@@ -16,6 +16,15 @@ from pathlib import Path
 from .settings import get_settings
 
 
+def _mkdir_private(path: Path) -> None:
+    """Create a server-owned directory as owner-only without changing existing paths."""
+
+    existed = path.exists()
+    path.mkdir(parents=True, mode=0o700, exist_ok=True)
+    if not existed:
+        path.chmod(0o700)
+
+
 def expand_path(path: str) -> Path:
     """Expand `~` in a path string.
 
@@ -34,14 +43,14 @@ def get_base_output_directory() -> Path:
     else:
         output_dir = Path.home() / "Downloads" / "images"
 
-    output_dir.mkdir(parents=True, exist_ok=True)
+    _mkdir_private(output_dir)
     return output_dir
 
 
 def get_provider_output_directory(provider: str) -> Path:
     """Get the default provider-specific directory for saving images."""
     provider_dir = get_base_output_directory() / provider
-    provider_dir.mkdir(parents=True, exist_ok=True)
+    _mkdir_private(provider_dir)
     return provider_dir
 
 
@@ -53,7 +62,7 @@ def get_log_directory() -> Path:
     else:
         log_dir = get_base_output_directory() / "logs"
 
-    log_dir.mkdir(parents=True, exist_ok=True)
+    _mkdir_private(log_dir)
     return log_dir
 
 
@@ -116,5 +125,5 @@ def resolve_output_path(
         if not str(resolved).startswith(str(allowed_base) + os.sep) and resolved != allowed_base:
             raise ValueError(f"Output path must be within {allowed_base}")
 
-    save_path.parent.mkdir(parents=True, exist_ok=True)
+    _mkdir_private(save_path.parent)
     return save_path

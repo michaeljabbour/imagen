@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 import respx
+from mcp.server.fastmcp.exceptions import ToolError
 
 from src import server
 from src.models.input_models import CostEstimateInput, OutputFormat, Provider
@@ -24,7 +25,7 @@ class TestListGeminiModels:
                 json={
                     "models": [
                         {
-                            "name": "models/gemini-3-pro-image-preview",
+                            "name": "models/gemini-3-pro-image",
                             "supportedGenerationMethods": ["generateContent"],
                             "description": "Nano Banana Pro image model",
                         },
@@ -38,7 +39,7 @@ class TestListGeminiModels:
             )
         )
         out = await server.list_gemini_models()
-        assert "gemini-3-pro-image-preview" in out
+        assert "gemini-3-pro-image" in out
         # Non-image model filtered out.
         assert "gemini-1.5-flash" not in out
 
@@ -57,15 +58,15 @@ class TestListGeminiModels:
         monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
         get_settings.cache_clear()
 
-        out = await server.list_gemini_models()
-        assert "No Gemini API Key" in out
+        with pytest.raises(ToolError, match="No Gemini API key configured"):
+            await server.list_gemini_models()
 
     @pytest.mark.asyncio
     @respx.mock
     async def test_http_error_handled(self):
         respx.get(MODELS_URL).mock(return_value=httpx.Response(500, text="boom"))
-        out = await server.list_gemini_models()
-        assert "Failed to list models" in out
+        with pytest.raises(ToolError, match="Server error '500 Internal Server Error'"):
+            await server.list_gemini_models()
 
 
 class TestEstimateCostNoProvider:
@@ -111,9 +112,26 @@ class TestMain:
         monkeypatch.setenv("IMAGEN_MCP_TRANSPORT", "streamable-http")
         monkeypatch.setenv("IMAGEN_MCP_HOST", "0.0.0.0")
         monkeypatch.setenv("IMAGEN_MCP_PORT", "9000")
+        monkeypatch.setenv("IMAGEN_MCP_ALLOW_INSECURE_REMOTE", "true")
 
         server.main()
 
         run.assert_called_once_with(transport="streamable-http")
         assert server.mcp.settings.host == "0.0.0.0"
         assert server.mcp.settings.port == 9000
+
+    def test_main_rejects_unauthenticated_remote_bind(self, monkeypatch):
+        monkeypatch.setattr("src.config.dotenv.load_dotenv", lambda **kw: {})
+        monkeypatch.setenv("IMAGEN_MCP_TRANSPORT", "streamable-http")
+        monkeypatch.setenv("IMAGEN_MCP_HOST", "0.0.0.0")
+        monkeypatch.delenv("IMAGEN_MCP_ALLOW_INSECURE_REMOTE", raising=False)
+
+        with pytest.raises(RuntimeError, match="Refusing non-loopback"):
+            server.main()
+
+    def test_main_rejects_unknown_transport(self, monkeypatch):
+        monkeypatch.setattr("src.config.dotenv.load_dotenv", lambda **kw: {})
+        monkeypatch.setenv("IMAGEN_MCP_TRANSPORT", "websocket")
+
+        with pytest.raises(ValueError, match="Unsupported IMAGEN_MCP_TRANSPORT"):
+            server.main()

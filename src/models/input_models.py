@@ -8,6 +8,7 @@ with rich descriptions for Claude to understand how to use them.
 from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field
+from pydantic.json_schema import SkipJsonSchema
 
 
 class Provider(str, Enum):
@@ -15,7 +16,7 @@ class Provider(str, Enum):
 
     AUTO = "auto"  # Auto-select based on prompt analysis
     OPENAI = "openai"  # OpenAI gpt-image-2 (ChatGPT Images 2.0)
-    GEMINI = "gemini"  # Google Gemini 3 Pro Image (Nano Banana Pro)
+    GEMINI = "gemini"  # Google Gemini 3 image family (default: 3.1 Flash Image)
 
 
 class OutputFormat(str, Enum):
@@ -49,7 +50,7 @@ class ImageGenerationInput(BaseModel):
             "auto-selected."
         ),
         min_length=1,
-        max_length=4000,
+        max_length=32000,
     )
 
     provider: Provider | None = Field(
@@ -58,7 +59,7 @@ class ImageGenerationInput(BaseModel):
             "Image generation provider to use:\n"
             "- 'auto' (default): Automatically selects best provider based on prompt\n"
             "- 'openai': OpenAI gpt-image-2 - best for text, UI mockups, diagrams\n"
-            "- 'gemini': Gemini Nano Banana Pro - best for portraits, products, 4K"
+            "- 'gemini': Gemini 3.1 Flash Image - portraits, products, and up to 4K"
         ),
     )
 
@@ -67,10 +68,13 @@ class ImageGenerationInput(BaseModel):
         default=None,
         description=(
             "Image size. Format depends on provider:\n"
-            "- OpenAI: 'auto', '1024x1024' (square), '1024x1536' (portrait), "
-            "'1536x1024' (landscape), '1792x1024' (widescreen), "
-            "'1024x1792' (tall), '512x512', '256x256'\n"
-            "- Gemini: '1K' (fast), '2K' (default), '4K' (max quality)\n"
+            "- OpenAI gpt-image-2: 'auto' or WIDTHxHEIGHT. Both edges must be "
+            "multiples of 16 and at most 3840px; ratio <= 3:1; total pixels "
+            "655,360-8,294,400. Common values: '1024x1024', '1536x1024', "
+            "'1024x1536', '2560x1440'.\n"
+            "- Older OpenAI models use their enumerated legacy sizes.\n"
+            "- Gemini: '1K' (default), '2K', '4K'; Gemini 3.1 Flash Image "
+            "also supports '0.5K'.\n"
             "Auto-detected from prompt if not specified."
         ),
     )
@@ -79,8 +83,11 @@ class ImageGenerationInput(BaseModel):
         default=None,
         description=(
             "Aspect ratio (Gemini only). Options: "
-            "'1:1', '2:3', '3:2', '3:4', '4:3', '4:5', '5:4', '9:16', '16:9', '21:9'. "
-            "For OpenAI, this is converted to the nearest supported size."
+            "'1:1', '2:3', '3:2', '3:4', '4:3', '4:5', '5:4', '9:16', '16:9', "
+            "'21:9'; Gemini 3.1 Flash and Flash Lite also support "
+            "'1:4', '4:1', '1:8', '8:1'. "
+            "For OpenAI gpt-image-2, baseline ratios are converted to exact valid "
+            "custom sizes; older GPT Image models use their nearest enumerated size."
         ),
     )
 
@@ -89,17 +96,20 @@ class ImageGenerationInput(BaseModel):
         default=None,
         description=(
             "Base64-encoded reference images for style/character consistency "
-            "(Gemini only). Up to 14 images: 6 for objects, 5 for human portraits. "
+            "(Gemini only). Up to 14 total; category limits are model-specific "
+            "(Flash: 10 objects/4 characters; Pro: 6 objects/5 characters/3 styles; "
+            "Lite: 14 object references). "
             "If provided, Gemini provider is automatically selected."
         ),
     )
 
     enable_google_search: bool | None = Field(
-        default=False,
+        default=None,
         description=(
             "Enable Google Search grounding for real-time data (Gemini only). "
             "Use for current weather, stock prices, live events, etc. "
-            "If enabled, Gemini provider is automatically selected."
+            "If enabled, Gemini provider is automatically selected. When omitted, "
+            "uses the server's ENABLE_GOOGLE_SEARCH setting."
         ),
     )
 
@@ -108,13 +118,20 @@ class ImageGenerationInput(BaseModel):
         description=(
             "Specific Google image model (Gemini only). Accepts canonical "
             "API IDs or friendly aliases:\n"
-            "- 'gemini-3.1-flash-image-preview' / alias 'nano-banana-2' "
-            "(default, fast, current default across Gemini/Search/Flow)\n"
-            "- 'gemini-3-pro-image-preview' / alias 'nano-banana-pro' "
-            "(highest fidelity, 4K, Thinking mode for precise text rendering)\n"
-            "Both support conversational editing, reference images (up to 14), "
-            "and Google Search grounding."
+            "- 'gemini-3.1-flash-image' / alias 'nano-banana-2' (default; "
+            "supports 0.5K/1K/2K/4K)\n"
+            "- 'gemini-3-pro-image' / alias 'nano-banana-pro' "
+            "(high fidelity, 1K/2K/4K, Thinking mode)\n"
+            "- 'gemini-3.1-flash-lite-image' / alias 'nano-banana-lite' "
+            "(cost-optimized 1K only; no Google Search)\n"
+            "All support conversational editing and model-specific reference "
+            "inputs; Flash and Pro support Google Search grounding."
         ),
+    )
+
+    thinking_level: str | None = Field(
+        default=None,
+        description=("Optional Gemini 3.1 Flash/Flash Lite thinking level: 'minimal' or 'high'."),
     )
 
     # --- OpenAI gpt-image-2 specific features ---
@@ -122,7 +139,7 @@ class ImageGenerationInput(BaseModel):
         default=None,
         description=(
             "Specific OpenAI image model to use (OpenAI only). Options:\n"
-            "- 'gpt-image-2' (default): ChatGPT Images 2.0 — fast, 99% text accuracy\n"
+            "- 'gpt-image-2' (default): current production model with flexible sizing\n"
             "- 'gpt-image-1.5': Interim Dec 2025 model\n"
             "- 'gpt-image-1': Legacy Apr 2025 model"
         ),
@@ -141,8 +158,8 @@ class ImageGenerationInput(BaseModel):
     openai_output_format: str | None = Field(
         default=None,
         description=(
-            "Image file encoding (OpenAI only). Options: 'png' (default, supports "
-            "transparency), 'jpeg' (smaller, lossy), 'webp' (best compression)."
+            "Image file encoding (OpenAI only). Options: 'png' (default, lossless), "
+            "'jpeg' (smaller, lossy), 'webp' (best compression)."
         ),
     )
 
@@ -161,8 +178,9 @@ class ImageGenerationInput(BaseModel):
         description=(
             "Background treatment (OpenAI only):\n"
             "- 'auto' (default): model decides\n"
-            "- 'transparent': requires png or webp format\n"
-            "- 'opaque': solid background"
+            "- 'opaque': solid background\n"
+            "gpt-image-2 does not support transparent output. 'transparent' is "
+            "accepted only for older models that support it."
         ),
     )
 
@@ -187,13 +205,14 @@ class ImageGenerationInput(BaseModel):
 
     # --- Common options ---
     enhance_prompt: bool | None = Field(
-        default=False,
+        default=None,
         description=(
             "Whether to enhance the prompt before generating. For OpenAI this "
-            "enables a multi-turn Responses-API flow (a gpt-5.1 prompt-refinement "
-            "round-trip BEFORE image generation) for richer context — at the cost "
-            "of extra latency. Defaults to False, which uses the fast direct "
-            "/images/generations call. Has no effect on Gemini."
+            "adds a Chat Completions prompt-refinement call (using gpt-5.1 by default) "
+            "before image generation for richer context — at the cost "
+            "of extra latency. When omitted, uses the server's "
+            "ENABLE_PROMPT_ENHANCEMENT setting (false by default). Enabling it adds a "
+            "separate assistant-model API call, latency, and cost. Has no effect on Gemini."
         ),
     )
 
@@ -213,15 +232,23 @@ class ImageGenerationInput(BaseModel):
         description="Output format for the tool response (markdown or json).",
     )
 
+    include_preview: bool | None = Field(
+        default=False,
+        description=(
+            "Opt in to a bounded MCP ImageContent thumbnail (max 512px/200KB). "
+            "Leave false for clients that serialize non-text content as JSON."
+        ),
+    )
+
     # --- API keys (optional overrides — hidden from repr/serialization) ---
-    openai_api_key: str | None = Field(
+    openai_api_key: SkipJsonSchema[str | None] = Field(
         default=None,
         repr=False,
         exclude=True,
         description="OpenAI API key override (uses OPENAI_API_KEY env var if not provided).",
     )
 
-    gemini_api_key: str | None = Field(
+    gemini_api_key: SkipJsonSchema[str | None] = Field(
         default=None,
         repr=False,
         exclude=True,
@@ -239,7 +266,7 @@ class ConversationalImageInput(BaseModel):
     model_config = ConfigDict(
         str_strip_whitespace=True,
         validate_assignment=True,
-        extra="ignore",  # Silently drop unknown fields
+        extra="forbid",
     )
 
     prompt: str = Field(
@@ -249,7 +276,7 @@ class ConversationalImageInput(BaseModel):
             "For refinements, use natural language like 'make it darker' or 'add more detail'."
         ),
         min_length=1,
-        max_length=4000,
+        max_length=32000,
     )
 
     conversation_id: str | None = Field(
@@ -293,27 +320,29 @@ class ConversationalImageInput(BaseModel):
 
     aspect_ratio: str | None = Field(
         default=None,
-        description="Aspect ratio (Gemini only).",
-    )
-
-    # Input image for refinement
-    input_image_file_id: str | None = Field(
-        default=None,
-        description=(
-            "File ID from previous generation to refine (OpenAI only). "
-            "Obtained from prior tool responses."
-        ),
+        description="Aspect ratio; converted to an exact valid size for OpenAI gpt-image-2.",
     )
 
     # Reference images (Gemini only)
     reference_images: list[str] | None = Field(
         default=None,
-        description="Base64-encoded reference images (Gemini only, up to 14).",
+        description="Base64-encoded reference images (Gemini only, up to 14 model-dependent).",
     )
 
     enable_google_search: bool | None = Field(
-        default=False,
-        description="Enable Google Search grounding (Gemini only).",
+        default=None,
+        description=(
+            "Enable Google Search grounding (Gemini only). When omitted, uses "
+            "the server's ENABLE_GOOGLE_SEARCH setting."
+        ),
+    )
+
+    enhance_prompt: bool | None = Field(
+        default=None,
+        description=(
+            "Enable OpenAI-only assistant prompt enhancement. When omitted, uses the "
+            "server's ENABLE_PROMPT_ENHANCEMENT setting (false by default)."
+        ),
     )
 
     # Gemini-specific
@@ -321,9 +350,15 @@ class ConversationalImageInput(BaseModel):
         default=None,
         description=(
             "Specific Gemini model (Gemini only):\n"
-            "- 'gemini-2.5-flash-preview-image-generation': Gemini 2.5 Flash (default)\n"
-            "- 'gemini-3-pro-image-preview': Nano Banana Pro, highest quality"
+            "- 'gemini-3.1-flash-image': Nano Banana 2 (default)\n"
+            "- 'gemini-3-pro-image': Nano Banana Pro\n"
+            "- 'gemini-3.1-flash-lite-image': Nano Banana Lite (1K only, no Search)"
         ),
+    )
+
+    thinking_level: str | None = Field(
+        default=None,
+        description="Gemini 3.1 Flash/Flash Lite thinking level: 'minimal' or 'high'.",
     )
 
     # OpenAI-specific
@@ -333,7 +368,7 @@ class ConversationalImageInput(BaseModel):
     )
 
     assistant_model: str | None = Field(
-        default="gpt-4o",
+        default=None,
         description="GPT model for understanding refinement instructions (OpenAI only).",
     )
 
@@ -344,7 +379,10 @@ class ConversationalImageInput(BaseModel):
 
     background: str | None = Field(
         default=None,
-        description="Background: 'auto' / 'transparent' / 'opaque' (OpenAI only).",
+        description=(
+            "Background: 'auto' / 'opaque' for gpt-image-2. 'transparent' is "
+            "legacy-model-only (OpenAI only)."
+        ),
     )
 
     # Output options
@@ -364,15 +402,20 @@ class ConversationalImageInput(BaseModel):
         description="Output format for the tool response.",
     )
 
+    include_preview: bool | None = Field(
+        default=False,
+        description="Opt in to a bounded MCP ImageContent thumbnail.",
+    )
+
     # API keys (hidden from repr/serialization)
-    openai_api_key: str | None = Field(
+    openai_api_key: SkipJsonSchema[str | None] = Field(
         default=None,
         repr=False,
         exclude=True,
         description="OpenAI API key override.",
     )
 
-    gemini_api_key: str | None = Field(
+    gemini_api_key: SkipJsonSchema[str | None] = Field(
         default=None,
         repr=False,
         exclude=True,
@@ -384,9 +427,9 @@ class EditImageInput(BaseModel):
     """
     Input model for image editing with gpt-image-2.
 
-    Uses the /images/edits endpoint with input_fidelity=high by default,
-    which preserves unchanged pixels more faithfully than direct generation.
-    Supports inpainting via optional mask.
+    Uses the /images/edits endpoint. gpt-image-2 always processes inputs at
+    high fidelity, so the legacy input_fidelity parameter is omitted for that
+    model. Supports inpainting via optional mask.
     """
 
     model_config = ConfigDict(
@@ -403,7 +446,7 @@ class EditImageInput(BaseModel):
             "'change the sky to sunset', 'remove the person in the background'."
         ),
         min_length=1,
-        max_length=4000,
+        max_length=32000,
     )
 
     image_path: str = Field(
@@ -424,8 +467,10 @@ class EditImageInput(BaseModel):
     size: str | None = Field(
         default=None,
         description=(
-            "Output size: 'auto', '1024x1024', '1024x1536', '1536x1024', "
-            "'512x512', '256x256'. Defaults to 'auto'."
+            "Output size. gpt-image-2 accepts 'auto' or constrained WIDTHxHEIGHT "
+            "(multiples of 16, each edge at most 3840px, ratio <= 3:1, total pixels "
+            "655,360-8,294,400). Older models retain enumerated legacy sizes. "
+            "Defaults to 'auto'."
         ),
     )
 
@@ -436,7 +481,10 @@ class EditImageInput(BaseModel):
 
     background: str | None = Field(
         default=None,
-        description="Background: 'auto' / 'transparent' / 'opaque'.",
+        description=(
+            "Background: 'auto' / 'opaque' for gpt-image-2. 'transparent' is "
+            "available only on older models that support it."
+        ),
     )
 
     openai_output_format: str | None = Field(
@@ -454,8 +502,9 @@ class EditImageInput(BaseModel):
     input_fidelity: str | None = Field(
         default=None,
         description=(
-            "How faithfully to preserve the source image: 'high' (default) or 'low'. "
-            "gpt-image-2 performs best at 'high', which keeps unchanged pixels constant."
+            "Legacy-model input fidelity: 'high' (default) or 'low'. gpt-image-2 "
+            "is always high fidelity, so this value is accepted for compatibility "
+            "but omitted from gpt-image-2 API requests."
         ),
     )
 
@@ -481,7 +530,12 @@ class EditImageInput(BaseModel):
         description="Output format for the tool response.",
     )
 
-    openai_api_key: str | None = Field(
+    include_preview: bool | None = Field(
+        default=False,
+        description="Opt in to a bounded MCP ImageContent thumbnail.",
+    )
+
+    openai_api_key: SkipJsonSchema[str | None] = Field(
         default=None,
         repr=False,
         exclude=True,
@@ -502,12 +556,20 @@ class CostEstimateInput(BaseModel):
         ...,
         description="Prompt to estimate cost for (used for auto provider selection).",
         min_length=1,
-        max_length=4000,
+        max_length=32000,
     )
 
     provider: Provider | None = Field(
         default=Provider.AUTO,
         description="Provider to estimate for: 'auto', 'openai', or 'gemini'.",
+    )
+
+    model: str | None = Field(
+        default=None,
+        description=(
+            "Optional provider model ID for model-specific published pricing, e.g. "
+            "'gpt-image-2', 'gemini-3.1-flash-image', or 'gemini-3-pro-image'."
+        ),
     )
 
     quality: str | None = Field(
@@ -563,25 +625,37 @@ class BatchItem(BaseModel):
         extra="forbid",
     )
 
-    prompt: str = Field(..., description="Image prompt.", min_length=1, max_length=4000)
+    prompt: str = Field(..., description="Image prompt.", min_length=1, max_length=32000)
     provider: Provider | None = Field(
         default=None,
         description="Override provider for this item ('auto'/'openai'/'gemini'). "
         "Falls back to the batch default_provider when omitted.",
     )
     size: str | None = Field(default=None, description="Image size (provider-specific).")
-    aspect_ratio: str | None = Field(default=None, description="Aspect ratio (Gemini).")
+    aspect_ratio: str | None = Field(
+        default=None,
+        description="Aspect ratio; converted to an exact valid size for OpenAI gpt-image-2.",
+    )
     n: int | None = Field(
         default=None, description="Images for this item (OpenAI, 1-10).", ge=1, le=10
     )
     quality: str | None = Field(default=None, description="Quality tier (OpenAI).")
     gemini_model: str | None = Field(default=None, description="Specific Gemini model.")
+    thinking_level: str | None = Field(
+        default=None,
+        description="Gemini 3.1 Flash/Flash Lite thinking level: minimal/high.",
+    )
     openai_model: str | None = Field(default=None, description="Specific OpenAI model.")
     reference_images: list[str] | None = Field(
         default=None, description="Base64 reference images (Gemini)."
     )
     enable_google_search: bool | None = Field(
-        default=False, description="Google Search grounding (Gemini)."
+        default=None,
+        description=("Google Search grounding (Gemini). When omitted, uses the server default."),
+    )
+    enhance_prompt: bool | None = Field(
+        default=None,
+        description="OpenAI-only prompt enhancement; omitted uses the false server default.",
     )
     output_path: str | None = Field(default=None, description="Optional save path for this item.")
 
@@ -619,10 +693,15 @@ class BatchGenerationInput(BaseModel):
         description="Output format for the tool response.",
     )
 
-    openai_api_key: str | None = Field(
+    include_preview: bool | None = Field(
+        default=False,
+        description="Opt in to one bounded MCP ImageContent thumbnail for the batch.",
+    )
+
+    openai_api_key: SkipJsonSchema[str | None] = Field(
         default=None, repr=False, exclude=True, description="OpenAI API key override."
     )
-    gemini_api_key: str | None = Field(
+    gemini_api_key: SkipJsonSchema[str | None] = Field(
         default=None, repr=False, exclude=True, description="Gemini API key override."
     )
 

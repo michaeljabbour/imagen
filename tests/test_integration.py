@@ -7,6 +7,8 @@ using mocked HTTP responses to avoid actual API calls.
 
 import json
 import os
+import stat
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -250,6 +252,83 @@ class TestConversationStore:
         assert len(openai_convs) == 2
         assert all(c["provider"] == "openai" for c in openai_convs)
 
+    def test_database_directory_and_sidecars_are_owner_only(self, temp_db):
+        temp_db.create_conversation("private", "openai")
+        temp_db.add_message("private", "user", "private prompt", image_base64="private-image")
+
+        assert stat.S_IMODE(temp_db.db_path.parent.stat().st_mode) == 0o700
+        for path in (
+            temp_db.db_path,
+            Path(f"{temp_db.db_path}-wal"),
+            Path(f"{temp_db.db_path}-shm"),
+        ):
+            assert path.exists()
+            assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+    def test_configured_retention_policy_runs_on_open(self, tmp_path, monkeypatch):
+        from unittest.mock import patch
+
+        from src.config.settings import get_settings
+        from src.services.conversation_store import ConversationStore
+
+        monkeypatch.setenv("IMAGEN_MCP_CONVERSATION_RETENTION_DAYS", "7")
+        get_settings.cache_clear()
+        with patch.object(
+            ConversationStore, "cleanup_old_conversations", autospec=True, return_value=0
+        ) as cleanup:
+            store = ConversationStore(tmp_path / "retention" / "conversations.db")
+        cleanup.assert_called_once_with(store, days=7)
+
+    def test_retention_policy_rechecks_during_long_running_writes(self, temp_db):
+        temp_db._last_cleanup_monotonic = time.monotonic() - 86_401
+        with patch.object(temp_db, "cleanup_old_conversations", return_value=0) as cleanup:
+            temp_db.add_turn(
+                "daily-cleanup",
+                "openai",
+                "prompt",
+                {"type": "image_generated"},
+                "image-data",
+            )
+        cleanup.assert_called_once_with(days=30)
+
+    def test_conversation_upsert_preserves_provider_and_creation_time(self, temp_db):
+        temp_db.create_conversation("locked", "openai")
+        original = temp_db.get_conversation("locked")
+
+        temp_db.create_conversation("locked", "gemini")
+        updated = temp_db.get_conversation("locked")
+
+        assert original is not None
+        assert updated is not None
+        assert updated["provider"] == "openai"
+        assert updated["created_at"] == original["created_at"]
+
+    def test_complete_turn_rolls_back_atomically_on_assistant_insert_failure(self, temp_db):
+        with temp_db._get_connection() as conn:
+            conn.execute(
+                """
+                CREATE TRIGGER fail_assistant_turn
+                BEFORE INSERT ON messages
+                WHEN NEW.role = 'assistant'
+                BEGIN
+                    SELECT RAISE(ABORT, 'injected failure');
+                END;
+                """
+            )
+            conn.commit()
+
+        with pytest.raises(Exception, match="injected failure"):
+            temp_db.add_turn(
+                "atomic",
+                "openai",
+                "user prompt",
+                {"type": "image_generated"},
+                "base64-image",
+            )
+
+        assert temp_db.get_conversation("atomic") is None
+        assert temp_db.get_messages("atomic") == []
+
 
 class TestOpenAIProviderMocked:
     """Tests for OpenAI provider with mocked API."""
@@ -302,6 +381,7 @@ class TestOpenAIProviderMocked:
 
             result = await provider.generate_image(
                 "A beautiful sunset",
+                enable_enhancement=True,
                 output_path=str(tmp_path / "test_image.png"),
             )
 
@@ -402,6 +482,44 @@ class TestImageResultFormatting:
         assert "Failed" in output
         assert "rate limit" in output
 
+    def test_markdown_lists_every_generated_variant(self):
+        from src.server import format_result_markdown
+
+        result = ImageResult(
+            success=True,
+            provider="openai",
+            model="gpt-image-2",
+            image_path=Path("/tmp/first.png"),
+            additional_paths=[Path("/tmp/second.png"), Path("/tmp/third.png")],
+            prompt="Variants",
+        )
+
+        output = format_result_markdown(result)
+
+        assert "/tmp/first.png" in output
+        assert "/tmp/second.png" in output
+        assert "/tmp/third.png" in output
+
+    def test_markdown_renders_required_search_suggestions_and_sources(self):
+        from src.server import format_result_markdown
+
+        result = ImageResult(
+            success=True,
+            provider="gemini",
+            model="gemini-3.1-flash-image",
+            prompt="Current weather",
+            grounding_metadata={
+                "search_suggestions_html": "<div>Search Suggestions</div>",
+                "sources": [{"uri": "https://example.com/weather", "title": "Weather"}],
+                "citations": [],
+            },
+        )
+
+        output = format_result_markdown(result)
+
+        assert "<div>Search Suggestions</div>" in output
+        assert "[Weather](https://example.com/weather)" in output
+
     def test_json_format(self):
         """Should format result as valid JSON."""
         from src.server import format_result_json
@@ -409,7 +527,7 @@ class TestImageResultFormatting:
         result = ImageResult(
             success=True,
             provider="gemini",
-            model="gemini-3-pro-image-preview",
+            model="gemini-3-pro-image",
             prompt="A mountain",
         )
 

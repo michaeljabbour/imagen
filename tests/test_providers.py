@@ -33,10 +33,8 @@ class TestOpenAIProvider:
         assert "1024x1024" in caps.supported_sizes
         assert caps.supports_reference_images is False
         assert caps.supports_real_time_data is False
-        # gpt-image-2 is dramatically faster than 1.x
-        assert caps.typical_latency_seconds <= 15.0
-        # Max resolution is now 1792x1024 on 2.0 (was 1536x1024 on 1.x)
-        assert caps.max_resolution == "1792x1024"
+        assert caps.typical_latency_seconds is None
+        assert "3840px" in caps.max_resolution
 
     def test_supported_sizes(self):
         """Provider should support the full 2.0-era size set."""
@@ -45,8 +43,8 @@ class TestOpenAIProvider:
             "1024x1024",
             "1024x1536",
             "1536x1024",
-            "1792x1024",  # new in 2.0-era
-            "1024x1792",  # new in 2.0-era
+            "2560x1440",
+            "3840x2160",
             "auto",
         ]
         for size in expected_sizes:
@@ -61,12 +59,13 @@ class TestOpenAIProvider:
         assert provider._resolve_model("") == DEFAULT_OPENAI_IMAGE_MODEL
 
     def test_resolve_model_explicit(self):
-        """_resolve_model should pass through known aliases and arbitrary names."""
+        """_resolve_model should accept only supported GPT Image model IDs."""
         provider = OpenAIProvider()
         assert provider._resolve_model("gpt-image-2") == "gpt-image-2"
         assert provider._resolve_model("gpt-image-1") == "gpt-image-1"
-        # Unknown names pass through so tests can target future models
-        assert provider._resolve_model("gpt-image-future") == "gpt-image-future"
+        for unsupported in ("gpt-5.1", "gpt-4o", "gpt-image-future"):
+            with pytest.raises(ValueError, match="Unsupported OpenAI image model"):
+                provider._resolve_model(unsupported)
 
     @pytest.mark.asyncio
     async def test_validate_params_accepts_new_options(self):
@@ -78,7 +77,7 @@ class TestOpenAIProvider:
             quality="high",
             openai_output_format="webp",
             openai_output_compression=80,
-            background="transparent",
+            background="opaque",
             moderation="low",
             n=2,
         )
@@ -86,15 +85,16 @@ class TestOpenAIProvider:
         assert validated["quality"] == "high"
         assert validated["output_format"] == "webp"
         assert validated["output_compression"] == 80
-        assert validated["background"] == "transparent"
+        assert validated["background"] == "opaque"
         assert validated["moderation"] == "low"
         assert validated["n"] == 2
 
     @pytest.mark.asyncio
     async def test_validate_params_rejects_invalid_quality(self):
         provider = OpenAIProvider()
-        with pytest.raises(ValueError, match="Invalid quality"):
-            await provider.validate_params("A sunset", quality="super")
+        for quality in ("super", "standard", "hd"):
+            with pytest.raises(ValueError, match="Invalid quality"):
+                await provider.validate_params("A sunset", quality=quality)
 
 
 class TestGeminiProvider:
@@ -120,7 +120,7 @@ class TestGeminiProvider:
     def test_supported_sizes(self):
         """Provider should support expected sizes."""
         provider = GeminiProvider()
-        expected_sizes = ["1K", "2K", "4K"]
+        expected_sizes = ["0.5K", "1K", "2K", "4K"]
         for size in expected_sizes:
             assert size in provider.capabilities.supported_sizes
 
@@ -132,40 +132,85 @@ class TestGeminiProvider:
         assert "1:1" in caps.supported_aspect_ratios
         assert "16:9" in caps.supported_aspect_ratios
 
+    @pytest.mark.asyncio
+    async def test_validate_uses_configured_aspect_ratio(self, monkeypatch):
+        from src.config.settings import get_settings
+
+        monkeypatch.setenv("DEFAULT_GEMINI_ASPECT_RATIO", "16:9")
+        get_settings.cache_clear()
+        provider = GeminiProvider()
+
+        validated = await provider.validate_params("A portrait")
+
+        assert validated["aspect_ratio"] == "16:9"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("ratio", ["1:4", "4:1", "1:8", "8:1"])
+    async def test_flash_accepts_extended_aspect_ratios(self, ratio):
+        provider = GeminiProvider()
+        validated = await provider.validate_params(
+            "A panorama", aspect_ratio=ratio, model_id="gemini-3.1-flash-image"
+        )
+        assert validated["aspect_ratio"] == ratio
+
+    @pytest.mark.asyncio
+    async def test_pro_rejects_flash_only_extended_aspect_ratio(self):
+        provider = GeminiProvider()
+        with pytest.raises(ValueError, match="Invalid aspect ratio"):
+            await provider.validate_params(
+                "A panorama", aspect_ratio="1:8", model_id="gemini-3-pro-image"
+            )
+
+    @pytest.mark.asyncio
+    async def test_flash_lite_accepts_extended_aspect_ratio(self):
+        provider = GeminiProvider()
+        validated = await provider.validate_params(
+            "A tall scene",
+            aspect_ratio="1:8",
+            model_id="gemini-3.1-flash-lite-image",
+        )
+        assert validated["aspect_ratio"] == "1:8"
+
     def test_default_is_nano_banana_2(self):
         """Default Gemini model should be Nano Banana 2 (current Google default)."""
         from src.config.constants import DEFAULT_GEMINI_IMAGE_MODEL
 
-        assert DEFAULT_GEMINI_IMAGE_MODEL == "gemini-3.1-flash-image-preview"
+        assert DEFAULT_GEMINI_IMAGE_MODEL == "gemini-3.1-flash-image"
 
     def test_resolve_model_id_handles_aliases(self):
         """Friendly aliases should resolve to canonical Nano Banana model IDs."""
         provider = GeminiProvider()
-        assert provider._resolve_model_id("nano-banana-2") == "gemini-3.1-flash-image-preview"
-        assert provider._resolve_model_id("nano-banana-pro") == "gemini-3-pro-image-preview"
+        assert provider._resolve_model_id("nano-banana-2") == "gemini-3.1-flash-image"
+        assert provider._resolve_model_id("nano-banana-pro") == "gemini-3-pro-image"
+        assert provider._resolve_model_id("nano-banana-lite") == "gemini-3.1-flash-lite-image"
+
+    def test_retired_preview_ids_fail_with_ga_migration(self):
+        provider = GeminiProvider()
+        with pytest.raises(ValueError, match="retired.*gemini-3.1-flash-image"):
+            provider._resolve_model_id("gemini-3.1-flash-image-preview")
+        with pytest.raises(ValueError, match="retired.*gemini-3-pro-image"):
+            provider._resolve_model_id("gemini-3-pro-image-preview")
 
     def test_imagen_aliases_no_longer_exist(self):
-        """Imagen 4 aliases were removed in v0.3.0 — they should fall back to the default."""
-        from src.config.constants import DEFAULT_GEMINI_IMAGE_MODEL
-
+        """Removed Imagen aliases must fail instead of silently changing models."""
         provider = GeminiProvider()
-        # Any imagen-* string is now "unknown" and should fall back
-        assert provider._resolve_model_id("imagen-4") == DEFAULT_GEMINI_IMAGE_MODEL
-        assert provider._resolve_model_id("imagen-4-ultra") == DEFAULT_GEMINI_IMAGE_MODEL
-        assert provider._resolve_model_id("imagen-4-fast") == DEFAULT_GEMINI_IMAGE_MODEL
+        for model in ("imagen-4", "imagen-4-ultra", "imagen-4-fast"):
+            with pytest.raises(ValueError, match="Unsupported Gemini image model"):
+                provider._resolve_model_id(model)
 
     def test_resolve_model_id_passes_through_canonical_ids(self):
         """Canonical model IDs in GEMINI_MODELS should pass through unchanged."""
         provider = GeminiProvider()
-        canonical = "gemini-3-pro-image-preview"
+        canonical = "gemini-3-pro-image"
         assert provider._resolve_model_id(canonical) == canonical
 
-    def test_resolve_model_id_falls_back_on_unknown(self):
-        """Unknown model names should warn and fall back to the default."""
+    def test_resolve_model_id_rejects_unknown(self):
+        """Unknown model names must fail rather than silently changing billing/model."""
         from src.config.constants import DEFAULT_GEMINI_IMAGE_MODEL
 
         provider = GeminiProvider()
-        assert provider._resolve_model_id("bogus-model-xyz") == DEFAULT_GEMINI_IMAGE_MODEL
+        with pytest.raises(ValueError, match="Unsupported Gemini image model"):
+            provider._resolve_model_id("bogus-model-xyz")
         assert provider._resolve_model_id(None) == DEFAULT_GEMINI_IMAGE_MODEL
 
     def test_imagen_models_removed(self):
@@ -180,6 +225,17 @@ class TestGeminiProvider:
             assert removed_id not in GEMINI_MODELS, (
                 f"{removed_id} should have been removed in v0.3.0"
             )
+
+    def test_lite_capability_contract(self):
+        from src.config.constants import GEMINI_MODELS
+
+        lite = GEMINI_MODELS["gemini-3.1-flash-lite-image"]
+        assert lite["supported_sizes"] == ["1K"]
+        assert lite["supports_google_search"] is False
+        assert lite["max_reference_images"] == 14
+        assert lite["max_object_images"] == 14
+        assert lite["supports_synthid"] is True
+        assert lite["supports_c2pa"] is True
 
 
 class TestProviderRegistry:

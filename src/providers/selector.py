@@ -116,32 +116,10 @@ class ProviderSelector:
                     confidence=1.0,
                     reasoning=f"User explicitly requested {explicit_provider} provider.",
                 )
-            else:
-                fallback = [p for p in available if p != explicit_provider]
-                if not fallback:
-                    raise ValueError(
-                        f"Requested provider '{explicit_provider}' not available "
-                        f"and no alternatives found. Set the appropriate API key."
-                    )
-                fallback_provider = fallback[0]
-                logger.warning(
-                    f"Requested provider '{explicit_provider}' not available. "
-                    f"Falling back to '{fallback_provider}'."  # noqa: E501
-                )
-                return ProviderRecommendation(
-                    provider=fallback_provider,
-                    confidence=0.5,
-                    reasoning=(
-                        f"Fallback: '{explicit_provider}' was requested but is not configured."
-                    ),
-                    is_fallback=True,
-                    fallback_notice=(
-                        f"You requested **{explicit_provider}**, but it's not configured. "
-                        f"Using **{fallback_provider}** instead. "
-                        f"Set `{explicit_provider.upper()}_API_KEY` to use {explicit_provider}."
-                    ),
-                    preferred_provider=explicit_provider,
-                )
+            raise ValueError(
+                f"Requested provider '{explicit_provider}' is not available. "
+                f"Set {explicit_provider.upper()}_API_KEY; explicit provider pins never fall back."
+            )
 
         # Check for hard requirements that force a specific provider
         forced_provider, force_reason = self._check_hard_requirements(
@@ -157,37 +135,10 @@ class ProviderSelector:
                     requires_real_time_data=enable_google_search,
                     requires_high_resolution=self._needs_high_resolution(size),
                 )
-            else:
-                fallback = [p for p in available if p != forced_provider]
-                if not fallback:
-                    raise ValueError(
-                        f"This request requires {forced_provider} ({force_reason}) "
-                        f"but it's not configured and no alternatives are available."
-                    )
-                fallback_provider = fallback[0]
-                missing = self._describe_missing_features(
-                    forced_provider, fallback_provider, reference_images, enable_google_search, size
-                )
-                logger.warning(
-                    f"Required provider '{forced_provider}' not available. "
-                    f"Falling back to '{fallback_provider}'. Missing features: {missing}"
-                )
-                return ProviderRecommendation(
-                    provider=fallback_provider,
-                    confidence=0.3,
-                    reasoning=f"Fallback: {force_reason}, but {forced_provider} is not configured.",
-                    requires_reference_images=bool(reference_images),
-                    requires_real_time_data=enable_google_search,
-                    requires_high_resolution=self._needs_high_resolution(size),
-                    is_fallback=True,
-                    fallback_notice=(
-                        f"This prompt is best suited for **{forced_provider}** ({force_reason}), "
-                        f"but it's not configured. Using **{fallback_provider}** instead. "
-                        f"Set `{forced_provider.upper()}_API_KEY` for better results."
-                    ),
-                    preferred_provider=forced_provider,
-                    missing_features=missing,
-                )
+            raise ValueError(
+                f"This request requires {forced_provider} ({force_reason}), but that provider "
+                "is not available. Hard feature requirements never fall back."
+            )
 
         # Score each provider based on prompt analysis
         openai_score, openai_reasons = self._score_for_openai(prompt_lower)
@@ -267,10 +218,6 @@ class ProviderSelector:
         if enable_google_search:
             return "gemini", "Google Search grounding requires Gemini provider"
 
-        # Native 4K requires Gemini (OpenAI gpt-image-2 maxes at 1792x1024)
-        if size and size.upper() == "4K":
-            return "gemini", "Native 4K resolution requires Gemini provider"
-
         # Check for real-time data keywords
         for keyword in GEMINI_REQUIRED_KEYWORDS:
             if keyword in prompt_lower:
@@ -296,12 +243,8 @@ class ProviderSelector:
                 )
             if enable_google_search:
                 missing.append("Google Search grounding (OpenAI does not support this)")
-            if size and size.upper() == "4K":
-                missing.append("native 4K resolution (max 1792x1024 with OpenAI gpt-image-2)")
         elif preferred == "openai" and fallback == "gemini":
-            missing.append(
-                "~99% character-accurate text rendering (OpenAI gpt-image-2 excels at text)"
-            )
+            missing.append("OpenAI's stronger text-rendering behavior")
         return missing
 
     def _score_for_openai(self, prompt_lower: str) -> tuple[float, list[str]]:
@@ -426,14 +369,14 @@ class ProviderSelector:
         lines = [
             "## Provider Comparison",
             "",
-            "| Feature | OpenAI gpt-image-2 | Gemini Nano Banana Pro |",
+            "| Feature | OpenAI gpt-image-2 | Gemini 3.1 Flash Image (default) |",
             "|---------|---------------------|------------------------|",
             f"| Available | {'✅' if 'openai' in available else '❌'} | "
             f"{'✅' if 'gemini' in available else '❌'} |",
-            "| Text Rendering | ⭐⭐⭐ Excellent (~99%) | ⭐⭐ Good |",
+            "| Text Rendering | ⭐⭐⭐ Excellent | ⭐⭐ Good |",
             "| Photorealism | ⭐⭐⭐ Near-photographic | ⭐⭐⭐ Excellent |",
-            "| Speed | ~3-8s | ~15s |",
-            "| Max Resolution | 1792x1024 | 4K (2048x2048) |",
+            "| Latency | Varies by size and quality | Varies by model and size |",
+            "| Max Resolution | 3840px edge / 8.29MP (>2K experimental) | 4K |",
             "| Reference Images | Single-image via edit_image | ✅ Multi-ref (up to 14) |",
             "| Real-time Data | ❌ | ✅ (Google Search) |",
             "| Sequential Editing | ✅ (preserve-pixel edits) | ⚠️ Limited |",
@@ -448,7 +391,7 @@ class ProviderSelector:
             "- Technical diagrams with precise labels",
             "- Multi-step edits that preserve unchanged pixels",
             "",
-            "**Gemini Nano Banana Pro:**",
+            "**Gemini 3.1 Flash Image (default):**",
             "- Photorealistic portraits and headshots",
             "- Product photography",
             "- Native 4K resolution output",

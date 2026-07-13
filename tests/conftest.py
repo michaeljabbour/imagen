@@ -41,6 +41,7 @@ def fake_env(monkeypatch, tmp_path):
     monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key")
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
     monkeypatch.setenv("OUTPUT_DIR", str(tmp_path / "out"))
+    monkeypatch.setenv("IMAGEN_MCP_ALLOWED_INPUT_ROOTS", str(tmp_path))
 
     get_settings.cache_clear()
     get_provider_registry.cache_clear()

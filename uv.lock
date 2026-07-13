@@ -624,7 +624,7 @@ wheels = [
 
 [[package]]
 name = "imagen-mcp"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "." }
 dependencies = [
     { name = "google-genai" },
@@ -650,7 +650,7 @@ dev = [
 requires-dist = [
     { name = "google-genai", specifier = ">=2.8.0" },
     { name = "httpx", specifier = ">=0.28.0" },
-    { name = "mcp", specifier = ">=1.26.0" },
+    { name = "mcp", specifier = ">=1.26.0,<2" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10" },
     { name = "pillow", specifier = ">=11.0.0" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.0" },

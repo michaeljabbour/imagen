@@ -8,7 +8,10 @@ ensuring consistent behavior across OpenAI, Gemini, and future providers.
 import asyncio
 import base64
 import logging
+import os
 from abc import ABC, abstractmethod
+from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -45,7 +48,7 @@ class ProviderCapabilities:
     supports_multi_turn: bool = True
 
     # Performance characteristics
-    typical_latency_seconds: float = 30.0
+    typical_latency_seconds: float | None = None
     cost_tier: str = "standard"  # low, standard, premium
 
     # Best use cases
@@ -97,6 +100,10 @@ class ImageResult:
 
     # Error info
     error: str | None = None
+    error_code: str | None = None
+    error_status: int | None = None
+    error_request_id: str | None = None
+    error_retryable: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -124,6 +131,10 @@ class ImageResult:
             "grounding_metadata": self.grounding_metadata,
             "verification_result": self.verification_result,
             "error": self.error,
+            "error_code": self.error_code,
+            "error_status": self.error_status,
+            "error_request_id": self.error_request_id,
+            "error_retryable": self.error_retryable,
         }
 
 
@@ -162,7 +173,8 @@ class ImageProvider(ABC):
         aspect_ratio: str | None = None,
         conversation_id: str | None = None,
         reference_images: list[str] | None = None,
-        enable_enhancement: bool = True,
+        enable_enhancement: bool = False,
+        persist_conversation: bool = False,
         output_path: str | None = None,
         **kwargs: Any,
     ) -> ImageResult:
@@ -176,6 +188,7 @@ class ImageProvider(ABC):
             conversation_id: ID for multi-turn conversation
             reference_images: List of base64-encoded reference images
             enable_enhancement: Whether to enhance the prompt
+            persist_conversation: Persist prompt/image history for later refinement
             output_path: Optional path to save the image
             **kwargs: Provider-specific parameters
 
@@ -232,6 +245,51 @@ class ImageProvider(ABC):
         """Generate a unique conversation ID."""
         return f"{self.name}_{uuid4().hex[:12]}"
 
+    @staticmethod
+    def _explicit_output_extension(output_path: str | None) -> str | None:
+        """Return an explicit file destination's normalized extension."""
+        if not output_path or not output_path.strip():
+            return None
+        raw = output_path.strip()
+        path = Path(raw).expanduser()
+        is_directory = (
+            raw.endswith(("/", "\\")) or (path.exists() and path.is_dir()) or not path.suffix
+        )
+        if is_directory:
+            return None
+        extension = path.suffix.lower().lstrip(".")
+        return "jpeg" if extension == "jpg" else extension
+
+    @staticmethod
+    def _plan_output_paths(output_path: str | None, count: int) -> list[str | None]:
+        """Plan collision-free destinations for a multi-image response.
+
+        Directory destinations can reuse the same value because every saved
+        image gets a UUID filename. An explicit file destination is indexed as
+        ``name.ext``, ``name_2.ext``, ... and checked before any provider call.
+        """
+        if count < 1:
+            raise ValueError("Image count must be at least 1.")
+        if not output_path or not output_path.strip():
+            return [output_path] * count
+
+        raw = output_path.strip()
+        path = Path(raw).expanduser()
+        is_directory = (
+            raw.endswith(("/", "\\")) or (path.exists() and path.is_dir()) or not path.suffix
+        )
+        if is_directory:
+            return [output_path] * count
+
+        planned = [path]
+        planned.extend(
+            path.with_name(f"{path.stem}_{index}{path.suffix}") for index in range(2, count + 1)
+        )
+        existing = next((candidate for candidate in planned if candidate.exists()), None)
+        if existing is not None:
+            raise FileExistsError(f"Refusing to overwrite existing output file: {existing}")
+        return [str(candidate) for candidate in planned]
+
     def _resolve_and_save_sync(self, b64_data: str, output_path: str | None, filename: str) -> Path:
         """Resolve output path, decode, and write — called via ``asyncio.to_thread()``.
 
@@ -240,7 +298,20 @@ class ImageProvider(ABC):
         """
         save_path = resolve_output_path(output_path, default_filename=filename, provider=self.name)
         image_bytes = base64.b64decode(b64_data)
-        save_path.write_bytes(image_bytes)
+        # Exclusive creation prevents both accidental overwrites and races
+        # between concurrent saves targeting the same explicit path.
+        descriptor = os.open(
+            save_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        try:
+            with os.fdopen(descriptor, "wb") as image_file:
+                image_file.write(image_bytes)
+        except BaseException:
+            with suppress(FileNotFoundError):
+                save_path.unlink()
+            raise
         return save_path
 
     async def _save_image(
@@ -249,6 +320,7 @@ class ImageProvider(ABC):
         prompt: str,
         output_path: str | None = None,
         *,
+        extension: str = "png",
         result: ImageResult | None = None,
     ) -> Path:
         """
@@ -262,18 +334,23 @@ class ImageProvider(ABC):
             b64_data: Base64-encoded image data
             prompt: Original prompt (used for filename)
             output_path: Optional custom output path
+            extension: Image encoding extension (png / jpeg / webp)
             result: If provided, ``image_path`` is set and ``image_base64``
                 is released after the save to free memory.
 
         Returns:
             Path where image was saved
         """
+        extension = extension.lower().lstrip(".")
+        if extension not in {"png", "jpeg", "jpg", "webp"}:
+            raise ValueError(f"Unsupported image filename extension: {extension}")
+
         # Generate default filename (cheap, stays on event loop)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         short_id = uuid4().hex[:8]
         prompt_snippet = "".join(c for c in prompt[:30] if c.isalnum() or c == " ").strip()
         prompt_snippet = prompt_snippet.replace(" ", "_")[:20]
-        filename = f"{self.name}_{timestamp}_{prompt_snippet}_{short_id}.png"
+        filename = f"{self.name}_{timestamp}_{prompt_snippet}_{short_id}.{extension}"
 
         save_path = await asyncio.to_thread(
             self._resolve_and_save_sync, b64_data, output_path, filename
@@ -296,6 +373,7 @@ class ImageProvider(ABC):
         max_retries: int = MAX_RETRIES,
         base_delay: float = 1.0,
         non_retryable: tuple[type[BaseException], ...] = (),
+        is_retryable: Callable[[Exception], bool] | None = None,
         **kwargs: Any,
     ) -> Any:
         """
@@ -309,6 +387,8 @@ class ImageProvider(ABC):
             non_retryable: Exception types that should fail immediately instead
                 of being retried (e.g. timeouts on long-running renders, where
                 retrying just multiplies the wait).
+            is_retryable: Optional provider-specific predicate. When supplied,
+                exceptions for which it returns false fail immediately.
             **kwargs: Keyword arguments for func
 
         Returns:
@@ -326,11 +406,17 @@ class ImageProvider(ABC):
                 # Fail fast — retrying won't help these.
                 raise
             except Exception as e:
+                if is_retryable is not None and not is_retryable(e):
+                    raise
                 last_error = e
                 if attempt < max_retries - 1:
                     delay = base_delay * (2**attempt)
                     logger.warning(
-                        f"Attempt {attempt + 1}/{max_retries} failed: {e}. Retrying in {delay}s..."
+                        "Attempt %d/%d failed error_type=%s; retrying in %ss",
+                        attempt + 1,
+                        max_retries,
+                        type(e).__name__,
+                        delay,
                     )
                     await asyncio.sleep(delay)
 
@@ -343,66 +429,27 @@ class ImageProvider(ABC):
         limiter = get_rate_limiter()
         await limiter.acquire(self.name)
 
-    async def _store_conversation_message(
+    async def _store_conversation_turn(
         self,
         conversation_id: str,
-        role: str,
-        content: Any,
-        image_base64: str | None = None,
+        user_content: Any,
+        assistant_content: Any,
+        image_base64: str,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        """
-        Store a message in the persistent conversation store.
+        """Persist a complete turn atomically and propagate storage failures."""
+        from ..services.conversation_store import get_conversation_store
 
-        SQLite I/O (a multi-MB INSERT + commit for image messages) is offloaded
-        to a worker thread so it never blocks the event loop.
-
-        Args:
-            conversation_id: Conversation ID
-            role: Message role (user, assistant)
-            content: Message content
-            image_base64: Optional base64 image
-            metadata: Optional metadata
-        """
-        try:
-            from ..services.conversation_store import get_conversation_store
-
-            store = get_conversation_store()
-
-            def _persist() -> None:
-                # create_conversation uses INSERT OR REPLACE, so this is
-                # safe to call unconditionally — avoids an extra SELECT
-                # round-trip on every message.
-                store.create_conversation(conversation_id, self.name)
-                store.add_message(conversation_id, role, content, image_base64, metadata)
-
-            await asyncio.to_thread(_persist)
-        except Exception as e:
-            logger.warning(f"Failed to persist conversation message: {e}")
-
-    async def _get_conversation_history(
-        self, conversation_id: str, limit: int | None = None
-    ) -> list[dict[str, Any]]:
-        """
-        Get conversation history from persistent store (off the event loop).
-
-        Args:
-            conversation_id: Conversation ID
-            limit: Optional cap on the number of (most recent) messages to
-                replay — keeps long conversations from bloating the
-                Responses-API payload (and its latency).
-
-        Returns:
-            List of messages
-        """
-        try:
-            from ..services.conversation_store import get_conversation_store
-
-            store = get_conversation_store()
-            return await asyncio.to_thread(store.get_messages, conversation_id, limit)
-        except Exception as e:
-            logger.warning(f"Failed to load conversation history: {e}")
-            return []
+        store = get_conversation_store()
+        await asyncio.to_thread(
+            store.add_turn,
+            conversation_id,
+            self.name,
+            user_content,
+            assistant_content,
+            image_base64,
+            metadata,
+        )
 
     async def _get_last_image_from_conversation(self, conversation_id: str) -> str | None:
         """
@@ -414,11 +461,7 @@ class ImageProvider(ABC):
         Returns:
             Base64-encoded image or None
         """
-        try:
-            from ..services.conversation_store import get_conversation_store
+        from ..services.conversation_store import get_conversation_store
 
-            store = get_conversation_store()
-            return await asyncio.to_thread(store.get_last_image, conversation_id)
-        except Exception as e:
-            logger.warning(f"Failed to load last image from conversation: {e}")
-            return None
+        store = get_conversation_store()
+        return await asyncio.to_thread(store.get_last_image, conversation_id)

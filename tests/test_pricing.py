@@ -16,10 +16,11 @@ class TestEstimateGenerationCost:
         assert est.per_image_usd is not None
         assert est.total_usd == est.per_image_usd
 
-    def test_openai_size_multiplier_increases_cost(self):
-        small = estimate_generation_cost("openai", quality="high", size="1024x1024")
-        large = estimate_generation_cost("openai", quality="high", size="1792x1024")
-        assert large.per_image_usd > small.per_image_usd
+    def test_openai_uses_published_sample_prices(self):
+        square = estimate_generation_cost("openai", quality="high", size="1024x1024")
+        landscape = estimate_generation_cost("openai", quality="high", size="1536x1024")
+        assert square.per_image_usd == 0.211
+        assert landscape.per_image_usd == 0.165
 
     def test_openai_quality_tiers_ordered(self):
         low = estimate_generation_cost("openai", quality="low", size="1024x1024")
@@ -34,24 +35,35 @@ class TestEstimateGenerationCost:
         est = estimate_generation_cost("openai", quality="ultra", size="1024x1024")
         assert est.per_image_usd is None
         assert est.total_usd is None
-        assert "Unknown quality" in est.note
+        assert "quality 'ultra'" in est.note
+
+    def test_openai_custom_size_is_not_extrapolated(self):
+        est = estimate_generation_cost("openai", quality="high", size="2560x1440")
+        assert est.per_image_usd is None
+        assert "not extrapolated" in (est.note or "")
 
     def test_gemini_resolution_pricing(self):
         one_k = estimate_generation_cost("gemini", size="1K")
         four_k = estimate_generation_cost("gemini", size="4K")
         assert four_k.per_image_usd > one_k.per_image_usd
+        assert one_k.per_image_usd == 0.067
+        assert four_k.per_image_usd == 0.151
 
     def test_gemini_pro_model_costs_more(self):
-        flash = estimate_generation_cost(
-            "gemini", model="gemini-3.1-flash-image-preview", size="2K"
-        )
-        pro = estimate_generation_cost("gemini", model="gemini-3-pro-image-preview", size="2K")
+        flash = estimate_generation_cost("gemini", model="gemini-3.1-flash-image", size="2K")
+        pro = estimate_generation_cost("gemini", model="gemini-3-pro-image", size="2K")
         assert pro.per_image_usd > flash.per_image_usd
+        assert flash.per_image_usd == 0.101
+        assert pro.per_image_usd == 0.134
+
+    def test_gemini_lite_published_price(self):
+        lite = estimate_generation_cost("gemini", model="gemini-3.1-flash-lite-image", size="1K")
+        assert lite.per_image_usd == 0.0336
 
     def test_gemini_unknown_size_returns_none(self):
         est = estimate_generation_cost("gemini", size="8K")
         assert est.per_image_usd is None
-        assert "Unknown size" in est.note
+        assert "No documented price" in est.note
 
     def test_unknown_provider_returns_none(self):
         est = estimate_generation_cost("midjourney")

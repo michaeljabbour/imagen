@@ -1,6 +1,9 @@
 """Tests for MCP server."""
 
+import json
 import os
+
+import pytest
 
 # Set dummy API keys for testing
 os.environ.setdefault("OPENAI_API_KEY", "test-key")
@@ -26,13 +29,14 @@ class TestServerImports:
         )
         from src.config.settings import get_settings
 
-        # gpt-image-2 supports a wider size range than 1.x did
+        # gpt-image-2 supports constrained arbitrary sizes; these are examples.
         assert len(OPENAI_SIZES) >= 6
         assert "1024x1024" in OPENAI_SIZES
-        assert "1792x1024" in OPENAI_SIZES  # new in 2.0-era
+        assert "2560x1440" in OPENAI_SIZES
+        assert "3840x2160" in OPENAI_SIZES
         assert DEFAULT_OPENAI_IMAGE_MODEL == "gpt-image-2"
         assert "high" in OPENAI_QUALITY_OPTIONS
-        assert len(GEMINI_SIZES) == 3
+        assert len(GEMINI_SIZES) == 4
         assert get_settings() is not None
 
     def test_provider_imports(self):
@@ -54,6 +58,37 @@ class TestServerImports:
         assert ImageGenerationInput is not None
         assert ConversationalImageInput is not None
 
+    def test_canonical_package_imports(self):
+        """The installed package name should expose the server and subpackages."""
+        from imagen_mcp.providers.openai_provider import OpenAIProvider
+
+        from imagen_mcp import __version__
+        from imagen_mcp.server import mcp
+
+        assert __version__ == "0.4.0"
+        assert OpenAIProvider is not None
+        assert mcp is not None
+
+    def test_secret_overrides_remain_programmatically_usable(self):
+        """Schema hiding must not break trusted direct callers."""
+        from src.models.input_models import ImageGenerationInput
+
+        params = ImageGenerationInput(
+            prompt="x", openai_api_key="openai-secret", gemini_api_key="gemini-secret"
+        )
+        assert params.openai_api_key == "openai-secret"
+        assert params.gemini_api_key == "gemini-secret"
+        assert "openai_api_key" not in params.model_dump()
+        assert "gemini_api_key" not in params.model_dump()
+
+    async def test_mcp_tool_schemas_do_not_expose_secret_fields(self):
+        """FastMCP tools/list must never advertise request-scoped credentials."""
+        from imagen_mcp.server import mcp
+
+        schemas = json.dumps([tool.inputSchema for tool in await mcp.list_tools()])
+        assert "openai_api_key" not in schemas
+        assert "gemini_api_key" not in schemas
+
 
 class TestSettings:
     """Tests for settings configuration."""
@@ -65,7 +100,7 @@ class TestSettings:
         settings = Settings.from_env()
         assert settings.default_provider == "auto"
         assert settings.default_openai_size == "1024x1024"
-        assert settings.default_gemini_size == "2K"
+        assert settings.default_gemini_size == "1K"
 
     def test_settings_has_keys(self):
         """Settings should detect API keys."""
@@ -118,3 +153,11 @@ class TestInputModels:
         )
         assert input_data.prompt == "Make it more colorful"
         assert input_data.conversation_id == "test-123"
+
+    def test_conversational_input_rejects_unknown_fields(self):
+        from pydantic import ValidationError
+
+        from src.models import ConversationalImageInput
+
+        with pytest.raises(ValidationError, match="conversationd_id"):
+            ConversationalImageInput(prompt="Refine", conversationd_id="typo")

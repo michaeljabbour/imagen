@@ -18,8 +18,7 @@ Thank you for your interest in contributing!
 
 3.  **Install dependencies**:
     ```bash
-    pip install -r requirements.txt
-    pip install -r dev-requirements.txt
+    uv sync --extra dev
     ```
 
 ## Code Quality
@@ -31,8 +30,8 @@ We use `ruff` for linting and formatting, and `mypy` for static type checking.
 Run the following command to format code and fix linting issues:
 
 ```bash
-ruff format .
-ruff check . --fix
+uv run ruff format imagen_mcp src tests
+uv run ruff check imagen_mcp src tests
 ```
 
 ### Type Checking
@@ -40,7 +39,7 @@ ruff check . --fix
 Run `mypy` to check for type errors:
 
 ```bash
-mypy src/
+uv run mypy imagen_mcp src
 ```
 
 Ensure all type checks pass before submitting a pull request.
@@ -50,7 +49,7 @@ Ensure all type checks pass before submitting a pull request.
 Run the test suite using `pytest`:
 
 ```bash
-pytest tests/ -v
+uv run pytest tests/ -v
 ```
 
 ## Pull Request Process

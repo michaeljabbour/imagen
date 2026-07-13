@@ -6,19 +6,26 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   quality:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.2.0
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
 
       - name: Create virtualenv (Python ${{ matrix.python-version }})
         run: uv venv --python ${{ matrix.python-version }}
@@ -27,16 +34,39 @@ jobs:
         run: uv pip install -e ".[dev]"
 
       - name: Ruff format check
-        run: uv run ruff format --check src/ tests/
+        run: uv run ruff format --check imagen_mcp/ src/ tests/
 
       - name: Ruff lint
-        run: uv run ruff check src/ tests/
+        run: uv run ruff check imagen_mcp/ src/ tests/
 
       - name: Type check
-        run: uv run mypy src/
+        run: uv run mypy imagen_mcp/ src/
 
       - name: Tests + coverage gate
         env:
           OPENAI_API_KEY: test-openai-key
           GEMINI_API_KEY: test-gemini-key
         run: uv run pytest --cov=src --cov-report=xml --cov-report=term-missing --cov-fail-under=80
+
+      - name: Build wheel and source distribution
+        run: uv build
+
+      - name: Clean-install wheel and smoke stdio
+        shell: bash
+        run: |
+          uv venv --python "${{ matrix.python-version }}" "$RUNNER_TEMP/imagen-wheel"
+          uv pip install --python "$RUNNER_TEMP/imagen-wheel/bin/python" dist/*.whl
+          uv pip check --python "$RUNNER_TEMP/imagen-wheel/bin/python"
+          cd "$RUNNER_TEMP"
+          env -u PYTHONPATH "$RUNNER_TEMP/imagen-wheel/bin/python" \
+            "$GITHUB_WORKSPACE/tests/installed_distribution_smoke.py"
+
+      - name: Clean-install source distribution and smoke stdio
+        shell: bash
+        run: |
+          uv venv --python "${{ matrix.python-version }}" "$RUNNER_TEMP/imagen-sdist"
+          uv pip install --python "$RUNNER_TEMP/imagen-sdist/bin/python" dist/*.tar.gz
+          uv pip check --python "$RUNNER_TEMP/imagen-sdist/bin/python"
+          cd "$RUNNER_TEMP"
+          env -u PYTHONPATH "$RUNNER_TEMP/imagen-sdist/bin/python" \
+            "$GITHUB_WORKSPACE/tests/installed_distribution_smoke.py"

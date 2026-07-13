@@ -11,6 +11,7 @@ import os
 import sqlite3
 import stat
 import threading
+import time
 from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime
@@ -43,17 +44,48 @@ class ConversationStore:
         """
         self.db_path = Path(db_path) if db_path else DEFAULT_DB_PATH
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(self.db_path.parent, stat.S_IRWXU)
         self._conn: sqlite3.Connection | None = None
         # Serializes access to the single shared connection. Required because
         # providers offload DB I/O to worker threads (asyncio.to_thread), so the
         # connection is touched from multiple threads.
         self._lock = threading.Lock()
+        self._maintenance_lock = threading.Lock()
         self._init_db()
+        self._secure_permissions()
 
-        # Restrict database file to owner-only read/write (0o600) so that
-        # other users on the system cannot read conversation history.
-        if self.db_path.exists():
-            os.chmod(self.db_path, stat.S_IRUSR | stat.S_IWUSR)
+        from ..config.settings import get_settings
+
+        self._retention_days = get_settings().conversation_retention_days
+        self._last_cleanup_monotonic = 0.0
+        if self._retention_days > 0:
+            self.cleanup_old_conversations(days=self._retention_days)
+            self._last_cleanup_monotonic = time.monotonic()
+
+    def _maybe_cleanup_old_conversations(self) -> None:
+        """Enforce retention at most once per day during normal writes."""
+        if self._retention_days <= 0:
+            return
+        now = time.monotonic()
+        if now - self._last_cleanup_monotonic < 86_400:
+            return
+        with self._maintenance_lock:
+            now = time.monotonic()
+            if now - self._last_cleanup_monotonic < 86_400:
+                return
+            self.cleanup_old_conversations(days=self._retention_days)
+            self._last_cleanup_monotonic = now
+
+    def _secure_permissions(self) -> None:
+        """Keep the database and SQLite sidecars private to the current user."""
+        os.chmod(self.db_path.parent, stat.S_IRWXU)
+        for path in (
+            self.db_path,
+            Path(f"{self.db_path}-wal"),
+            Path(f"{self.db_path}-shm"),
+        ):
+            if path.exists():
+                os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
 
     def _get_persistent_connection(self) -> sqlite3.Connection:
         """Return the persistent connection, creating it on first use."""
@@ -75,7 +107,10 @@ class ConversationStore:
         serializes all DB access across threads.
         """
         with self._lock:
-            yield self._get_persistent_connection()
+            try:
+                yield self._get_persistent_connection()
+            finally:
+                self._secure_permissions()
 
     def close(self) -> None:
         """Close the persistent connection (call on shutdown)."""
@@ -129,8 +164,9 @@ class ConversationStore:
         with self._get_connection() as conn:
             conn.execute(
                 """
-                INSERT OR REPLACE INTO conversations (id, provider, created_at, updated_at)
+                INSERT INTO conversations (id, provider, created_at, updated_at)
                 VALUES (?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at
                 """,
                 (conversation_id, provider, now, now),
             )
@@ -179,6 +215,58 @@ class ConversationStore:
                 (now, conversation_id),
             )
             conn.commit()
+
+    def add_turn(
+        self,
+        conversation_id: str,
+        provider: str,
+        user_content: Any,
+        assistant_content: Any,
+        image_base64: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Atomically persist a complete resumable user/assistant image turn."""
+        self._maybe_cleanup_old_conversations()
+        now = datetime.now().isoformat()
+        user_json = user_content if isinstance(user_content, str) else json.dumps(user_content)
+        assistant_json = (
+            assistant_content
+            if isinstance(assistant_content, str)
+            else json.dumps(assistant_content)
+        )
+        metadata_json = json.dumps(metadata) if metadata else None
+
+        with self._get_connection() as conn:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute(
+                    """
+                    INSERT INTO conversations (id, provider, created_at, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at
+                    """,
+                    (conversation_id, provider, now, now),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO messages
+                        (conversation_id, role, content, image_base64, metadata, created_at)
+                    VALUES (?, 'user', ?, NULL, NULL, ?)
+                    """,
+                    (conversation_id, user_json, now),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO messages
+                        (conversation_id, role, content, image_base64, metadata, created_at)
+                    VALUES (?, 'assistant', ?, ?, ?, ?)
+                    """,
+                    (conversation_id, assistant_json, image_base64, metadata_json, now),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
 
     def get_messages(self, conversation_id: str, limit: int | None = None) -> list[dict[str, Any]]:
         """

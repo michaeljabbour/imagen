@@ -9,7 +9,7 @@
 # The server uses the FastMCP bundled in the `mcp` SDK, not the standalone
 # `fastmcp` package (see MODERNIZATION_PLAN.md Phase 8).
 
-mcp>=1.26.0
+mcp>=1.26.0,<2
 pydantic>=2.12.3
 httpx>=0.28.0
 google-genai>=2.8.0

@@ -2,8 +2,8 @@
 imagen-mcp: Multi-Provider Image Generation MCP Server
 
 Supports multiple image generation providers:
-- OpenAI GPT-Image-1: Best for text rendering, infographics, comics
-- Google Gemini 3 Pro Image (Nano Banana Pro): Best for portraits, products, 4K
+- OpenAI gpt-image-2: Best for text rendering, infographics, comics
+- Google Gemini 3 image models (default: 3.1 Flash Image): portraits, products, 4K
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

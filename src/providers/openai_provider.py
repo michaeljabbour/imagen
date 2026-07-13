@@ -5,28 +5,31 @@ Two code paths are exposed:
 
 - **Direct path** — a plain POST to ``/images/generations`` with the full
   gpt-image-2 parameter surface (quality, output_format, background,
-  moderation, n, style, output_compression). Used when
-  ``enable_enhancement=False`` for speed (~3-8s on gpt-image-2).
+  moderation, n, output_compression). Used when
+  ``enable_enhancement=False`` to avoid the prompt-refinement round trip.
 
-- **Responses-API path** — a two-stage flow where ``gpt-4o`` (or a
+- **Chat Completions refinement path** — a two-stage flow where ``gpt-5.1`` (or a
   user-chosen assistant model) first refines the prompt through a
   forced function call, then the refined prompt is passed to
   ``/images/generations``. Used when ``enable_enhancement=True`` and
   for the conversational tool (preserves multi-turn context).
 
-An ``edit_image`` entry point targets ``/images/edits`` with
-``input_fidelity=high`` by default so gpt-image-2 can preserve
-unchanged pixels between sequential edits.
+An ``edit_image`` entry point targets ``/images/edits``.  gpt-image-2 always
+processes inputs at high fidelity, so its requests deliberately omit the
+legacy ``input_fidelity`` parameter.
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
+import io
 import json
 import logging
 import time
 from datetime import datetime
+from math import gcd
 from pathlib import Path
 from typing import Any, cast
 
@@ -39,20 +42,33 @@ from ..config.constants import (
     DEFAULT_OPENAI_MODERATION,
     DEFAULT_OPENAI_OUTPUT_FORMAT,
     DEFAULT_OPENAI_QUALITY,
-    MAX_PROMPT_LENGTH,
     OPENAI_API_BASE_URL,
+    OPENAI_ASPECT_RATIOS,
+    OPENAI_ASSISTANT_MODELS,
     OPENAI_BACKGROUND_OPTIONS,
     OPENAI_EDIT_SIZES,
+    OPENAI_GPT_IMAGE_2_BACKGROUND_OPTIONS,
+    OPENAI_GPT_IMAGE_2_MAX_ASPECT_RATIO,
+    OPENAI_GPT_IMAGE_2_MAX_EDGE,
+    OPENAI_GPT_IMAGE_2_MAX_PIXELS,
+    OPENAI_GPT_IMAGE_2_MIN_PIXELS,
+    OPENAI_IMAGE_MODELS,
     OPENAI_INPUT_FIDELITY_OPTIONS,
+    OPENAI_LEGACY_SIZES,
     OPENAI_MAX_N,
-    OPENAI_MODELS,
+    OPENAI_MAX_PROMPT_LENGTH,
     OPENAI_MODERATION_OPTIONS,
     OPENAI_OUTPUT_FORMATS,
     OPENAI_QUALITY_OPTIONS,
     OPENAI_SIZES,
-    OPENAI_STYLES,
 )
 from ..config.settings import get_settings
+from ..exceptions import (
+    AuthenticationError,
+    GenerationError,
+    ProviderError,
+    RateLimitError,
+)
 from .base import ImageProvider, ImageResult, ProviderCapabilities
 
 logger = logging.getLogger(__name__)
@@ -63,16 +79,17 @@ class OpenAIProvider(ImageProvider):
     OpenAI gpt-image-2 (ChatGPT Images 2.0) provider.
 
     Best for:
-    - Text rendering (menus, infographics, comics) — ~99% character accuracy
+    - Text rendering (menus, infographics, comics)
     - UI mockups and screenshot-style renders
     - Technical diagrams and labeled illustrations
     - Marketing materials with exact text
     - Precise instruction following and world knowledge
 
     Limitations vs Gemini:
-    - Max 1792x1024 (no native 4K)
+    - Sizes above 2560x1440 are experimental (maximum edge 3840px)
+    - No transparent-background output
     - No reference image support on /images/generations
-      (use the edit_image tool with input_fidelity='high' instead)
+      (use the edit_image tool instead)
     - No real-time data grounding
     """
 
@@ -127,15 +144,15 @@ class OpenAIProvider(ImageProvider):
                 display_name="OpenAI gpt-image-2",
                 supported_sizes=OPENAI_SIZES,
                 supported_aspect_ratios=["1:1", "2:3", "3:2", "16:9", "9:16"],
-                max_resolution="1792x1024",
+                max_resolution="3840px edge (8,294,400 pixels max)",
                 supports_text_rendering=True,
-                text_rendering_quality="excellent",  # ~99% char accuracy on 2.0
+                text_rendering_quality="excellent",
                 supports_reference_images=False,  # via edit_image only
                 max_reference_images=0,
                 supports_real_time_data=False,
                 supports_thinking_mode=False,
                 supports_multi_turn=True,
-                typical_latency_seconds=8.0,  # gpt-image-2 is ~3-8s
+                typical_latency_seconds=None,
                 cost_tier="standard",
                 best_for=[
                     "Text rendering (menus, posters, infographics)",
@@ -146,7 +163,7 @@ class OpenAIProvider(ImageProvider):
                     "Multi-step sequential edits (preserve-pixel editing)",
                 ],
                 not_recommended_for=[
-                    "Native 4K output (use Gemini)",
+                    "Transparent-background output (use downstream removal)",
                     "Multi-reference character consistency (use Gemini)",
                     "Real-time data visualization (use Gemini)",
                 ],
@@ -166,11 +183,120 @@ class OpenAIProvider(ImageProvider):
         return api_key
 
     def _resolve_model(self, openai_model: str | None) -> str:
-        """Resolve a user-provided model alias/name to a canonical model id."""
+        """Resolve and strictly validate an Image API model identifier."""
         if not openai_model:
             return DEFAULT_OPENAI_IMAGE_MODEL
-        # Accept both alias keys and canonical ids
-        return OPENAI_MODELS.get(openai_model, openai_model)
+        try:
+            return OPENAI_IMAGE_MODELS[openai_model]
+        except KeyError as exc:
+            supported = ", ".join(OPENAI_IMAGE_MODELS)
+            raise ValueError(
+                f"Unsupported OpenAI image model '{openai_model}'. Supported: {supported}."
+            ) from exc
+
+    @staticmethod
+    def _is_gpt_image_2(model: str) -> bool:
+        """Return whether ``model`` uses the gpt-image-2 parameter contract."""
+        return model == "gpt-image-2"
+
+    def _validate_size(self, size: str, model: str) -> str:
+        """Normalize and validate an Image API size for the selected model.
+
+        gpt-image-2 accepts constrained arbitrary resolutions.  Earlier models
+        keep the server's historical enumerated behavior for compatibility.
+        """
+        normalized = size.strip().replace("X", "x")
+        if normalized.lower() == "auto":
+            return "auto"
+
+        # Provider-neutral shorthand is useful for callers that switch models.
+        if self._is_gpt_image_2(model):
+            shorthand = {
+                "1K": "1024x1024",
+                "2K": "2560x1440",
+                "4K": "3840x2160",
+            }
+        else:
+            shorthand = {
+                "1K": "1024x1024",
+                "2K": "1536x1024",
+                "4K": "1536x1024",
+            }
+
+        mapped = shorthand.get(normalized.upper())
+        if mapped:
+            logger.info("Converting size shorthand '%s' to OpenAI size '%s'.", size, mapped)
+            normalized = mapped
+
+        if not self._is_gpt_image_2(model):
+            if normalized not in OPENAI_LEGACY_SIZES:
+                raise ValueError(
+                    f"Invalid size '{normalized}' for {model}. Supported: "
+                    f"{', '.join(OPENAI_LEGACY_SIZES)}"
+                )
+            return normalized
+
+        parts = normalized.split("x")
+        if len(parts) != 2 or not all(part.isdigit() for part in parts):
+            raise ValueError(
+                f"Invalid size '{normalized}' for gpt-image-2. Use 'auto' or WIDTHxHEIGHT."
+            )
+
+        width, height = (int(part) for part in parts)
+        if width == 0 or height == 0:
+            raise ValueError("gpt-image-2 width and height must be positive.")
+        if width % 16 or height % 16:
+            raise ValueError("gpt-image-2 width and height must both be multiples of 16.")
+        if max(width, height) > OPENAI_GPT_IMAGE_2_MAX_EDGE:
+            raise ValueError(
+                "gpt-image-2 width and height must each be at most "
+                f"{OPENAI_GPT_IMAGE_2_MAX_EDGE}px."
+            )
+
+        aspect_ratio = max(width, height) / min(width, height)
+        if aspect_ratio > OPENAI_GPT_IMAGE_2_MAX_ASPECT_RATIO:
+            raise ValueError("gpt-image-2 long-to-short edge ratio must not exceed 3:1.")
+
+        pixels = width * height
+        if not OPENAI_GPT_IMAGE_2_MIN_PIXELS <= pixels <= OPENAI_GPT_IMAGE_2_MAX_PIXELS:
+            raise ValueError(
+                "gpt-image-2 total pixels must be between "
+                f"{OPENAI_GPT_IMAGE_2_MIN_PIXELS:,} and "
+                f"{OPENAI_GPT_IMAGE_2_MAX_PIXELS:,}."
+            )
+        return normalized
+
+    def _validate_background(self, background: str, model: str) -> str:
+        """Validate background treatment against the selected model."""
+        allowed = (
+            OPENAI_GPT_IMAGE_2_BACKGROUND_OPTIONS
+            if self._is_gpt_image_2(model)
+            else OPENAI_BACKGROUND_OPTIONS
+        )
+        if background not in allowed:
+            if self._is_gpt_image_2(model) and background == "transparent":
+                raise ValueError(
+                    "gpt-image-2 does not support transparent backgrounds; "
+                    "use 'auto' or 'opaque' and remove the background downstream."
+                )
+            raise ValueError(
+                f"Invalid background '{background}' for {model}. Supported: {', '.join(allowed)}"
+            )
+        return background
+
+    @staticmethod
+    def _is_retryable_api_error(error: Exception) -> bool:
+        """Return whether an OpenAI request failure is safe to retry."""
+        if isinstance(error, httpx.TimeoutException):
+            # Image renders can run for minutes; retrying multiplies the wait
+            # and may duplicate billable work.
+            return False
+        if isinstance(error, httpx.HTTPStatusError):
+            status = error.response.status_code
+            return status == 429 or status >= 500
+        # Connection resets, DNS/connect failures, and protocol errors are
+        # transient transport failures. Other programming/data errors are not.
+        return isinstance(error, httpx.TransportError)
 
     async def _make_api_request(
         self,
@@ -203,19 +329,99 @@ class OpenAIProvider(ImageProvider):
             return cast("dict[str, Any]", response.json())
 
         try:
-            # Don't retry timeouts: with a generous read ceiling, a genuinely
-            # stuck request should fail once (minutes), not be retried ×N.
             return cast(
                 "dict[str, Any]",
                 await self._retry_with_backoff(
-                    _do_request, non_retryable=(httpx.TimeoutException,)
+                    _do_request,
+                    is_retryable=self._is_retryable_api_error,
                 ),
             )
         except httpx.HTTPStatusError as e:
-            error_detail = e.response.text
-            raise ValueError(f"OpenAI API error ({e.response.status_code}): {error_detail}") from e
+            status = e.response.status_code
+            request_id = e.response.headers.get("x-request-id")
+            try:
+                payload = e.response.json()
+                error_payload = payload.get("error", {}) if isinstance(payload, dict) else {}
+            except (ValueError, TypeError):
+                error_payload = {}
+            raw_code = (
+                error_payload.get("code") or error_payload.get("type")
+                if isinstance(error_payload, dict)
+                else None
+            )
+            code = str(raw_code or f"http_{status}")
+            normalized_code = code.lower()
+            logger.error(
+                "OpenAI request failed status=%s code=%s request_id=%s retryable=%s",
+                status,
+                code,
+                request_id,
+                status == 429 or status >= 500,
+            )
+            common = {
+                "provider": "openai",
+                "status_code": status,
+                "request_id": request_id,
+            }
+            if status in (401, 403):
+                raise AuthenticationError(
+                    "OpenAI authentication failed.",
+                    code=code,
+                    user_message="OpenAI authentication failed. Check the configured API key.",
+                    **common,
+                ) from e
+            if status == 429:
+                raise RateLimitError(
+                    "OpenAI rate limit exceeded.",
+                    **common,
+                ) from e
+            if any(term in normalized_code for term in ("moderation", "safety", "policy")):
+                raise GenerationError(
+                    "OpenAI moderation blocked the request.",
+                    code="moderation_blocked",
+                    user_message="The image request was blocked by the provider's safety policy.",
+                    **common,
+                ) from e
+            if status >= 500:
+                raise ProviderError(
+                    "OpenAI service error.",
+                    code=code,
+                    retryable=True,
+                    user_message="OpenAI is temporarily unavailable. Please try again.",
+                    **common,
+                ) from e
+            raise GenerationError(
+                "OpenAI rejected the image request.",
+                code=code,
+                user_message="OpenAI rejected the image request. Check its prompt and parameters.",
+                **common,
+            ) from e
+        except ProviderError:
+            raise
+        except httpx.TimeoutException as e:
+            raise ProviderError(
+                "OpenAI request timed out.",
+                provider="openai",
+                code="timeout",
+                retryable=False,
+                user_message="OpenAI image generation timed out; it was not retried.",
+            ) from e
+        except httpx.TransportError as e:
+            raise ProviderError(
+                "OpenAI transport failure.",
+                provider="openai",
+                code="transport_error",
+                retryable=True,
+                user_message="Could not reach OpenAI. Please try again.",
+            ) from e
         except Exception as e:
-            raise ValueError(f"API request failed: {e!s}") from e
+            raise ProviderError(
+                "OpenAI returned an invalid response.",
+                provider="openai",
+                code="invalid_response",
+                retryable=False,
+                user_message="OpenAI returned an invalid response.",
+            ) from e
 
     # ------------------------------------------------------------------
     # Direct /images/generations path
@@ -258,7 +464,9 @@ class OpenAIProvider(ImageProvider):
         if moderation is not None:
             payload["moderation"] = moderation
         if style is not None:
-            payload["style"] = style
+            raise ValueError(
+                "style is only supported by DALL-E 3 and is unavailable on GPT Image models."
+            )
         if n is not None and n > 1:
             payload["n"] = n
         return payload
@@ -278,7 +486,7 @@ class OpenAIProvider(ImageProvider):
         style: str | None,
         n: int | None,
     ) -> dict[str, Any]:
-        """Call /images/generations directly (no Responses-API pre-stage)."""
+        """Call /images/generations directly without prompt refinement."""
         payload = self._build_generate_payload(
             model=model,
             prompt=prompt,
@@ -298,11 +506,66 @@ class OpenAIProvider(ImageProvider):
             json_data=payload,
         )
 
+    async def _call_images_edit_bytes(
+        self,
+        *,
+        api_key: str,
+        model: str,
+        prompt: str,
+        image_b64: str,
+        size: str,
+        quality: str | None,
+        output_format: str | None,
+        output_compression: int | None,
+        background: str | None,
+        n: int | None,
+    ) -> dict[str, Any]:
+        """Apply a conversational edit to the prior generated image bytes."""
+        try:
+            image_bytes = base64.b64decode(image_b64, validate=True)
+        except ValueError as e:
+            raise ValueError("Stored conversation image is not valid base64 data.") from e
+
+        if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+            filename, content_type = "conversation.png", "image/png"
+        elif image_bytes.startswith(b"\xff\xd8\xff"):
+            filename, content_type = "conversation.jpeg", "image/jpeg"
+        elif image_bytes.startswith(b"RIFF") and image_bytes[8:12] == b"WEBP":
+            filename, content_type = "conversation.webp", "image/webp"
+        else:
+            raise ValueError("Stored conversation image is not a supported PNG, JPEG, or WebP.")
+
+        form_data: dict[str, Any] = {
+            "model": model,
+            "prompt": prompt,
+            "size": size,
+        }
+        if not self._is_gpt_image_2(model):
+            form_data["input_fidelity"] = DEFAULT_OPENAI_INPUT_FIDELITY
+        if quality is not None:
+            form_data["quality"] = quality
+        if output_format is not None:
+            form_data["output_format"] = output_format
+        if output_compression is not None:
+            form_data["output_compression"] = output_compression
+        if background is not None:
+            form_data["background"] = background
+        if n is not None and n > 1:
+            form_data["n"] = str(n)
+
+        logger.info("Calling /images/edits for conversation continuation model=%s", model)
+        return await self._make_api_request(
+            endpoint="/images/edits",
+            api_key=api_key,
+            files={"image": (filename, image_bytes, content_type)},
+            data=form_data,
+        )
+
     # ------------------------------------------------------------------
-    # Responses-API (multi-turn / enhanced) path
+    # Chat Completions prompt-refinement path
     # ------------------------------------------------------------------
 
-    async def _call_responses_api(
+    async def _call_chat_completions_refinement(
         self,
         *,
         prompt: str,
@@ -310,7 +573,6 @@ class OpenAIProvider(ImageProvider):
         conversation_id: str,
         assistant_model: str,
         image_model: str,
-        input_image_file_id: str | None,
         size: str,
         quality: str | None,
         output_format: str | None,
@@ -320,27 +582,13 @@ class OpenAIProvider(ImageProvider):
         style: str | None,
         n: int | None,
     ) -> dict[str, Any]:
-        """Two-stage call: prompt refinement via chat -> image generation."""
-        messages: list[dict[str, Any]] = []
-
-        # Replay history from persistent store
-        # Replay only the most recent turns — caps the /chat/completions
-        # payload (and latency) on long-running conversations.
-        history = await self._get_conversation_history(conversation_id, limit=10)
-        for msg in history:
-            messages.append({"role": msg["role"], "content": msg["content"]})
-
-        # Current user turn
-        current_message: dict[str, Any] = {"role": "user", "content": []}
-        if input_image_file_id:
-            current_message["content"].append(
-                {
-                    "type": "image_file",
-                    "image_file": {"file_id": input_image_file_id},
-                }
+        """Refine through /chat/completions, then call image generation."""
+        if assistant_model not in OPENAI_ASSISTANT_MODELS:
+            raise ValueError(
+                f"Unsupported OpenAI assistant model '{assistant_model}'. Supported: "
+                f"{', '.join(sorted(OPENAI_ASSISTANT_MODELS))}."
             )
-        current_message["content"].append({"type": "text", "text": prompt})
-        messages.append(current_message)
+        messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
 
         # Forced function-calling tool schema — lets the assistant model refine
         # the prompt and choose a size. We still own the actual image call.
@@ -349,12 +597,22 @@ class OpenAIProvider(ImageProvider):
                 "type": "string",
                 "description": "Refined prompt to send to the image model",
             },
-            "size": {
-                "type": "string",
-                "enum": list(OPENAI_SIZES),
-                "default": "1024x1024",
-            },
         }
+        if self._is_gpt_image_2(image_model):
+            tool_schema_properties["size"] = {
+                "type": "string",
+                "description": (
+                    "Output size as WIDTHxHEIGHT: both edges must be multiples of 16 and "
+                    "at most 3840px; ratio <= 3:1; 655,360-8,294,400 total pixels."
+                ),
+                "default": "1024x1024",
+            }
+        else:
+            tool_schema_properties["size"] = {
+                "type": "string",
+                "enum": list(OPENAI_LEGACY_SIZES),
+                "default": "1024x1024",
+            }
         if quality is None:
             tool_schema_properties["quality"] = {
                 "type": "string",
@@ -377,6 +635,7 @@ class OpenAIProvider(ImageProvider):
                             "type": "object",
                             "properties": tool_schema_properties,
                             "required": ["prompt"],
+                            "additionalProperties": False,
                         },
                     },
                 }
@@ -395,9 +654,6 @@ class OpenAIProvider(ImageProvider):
             json_data=payload,
         )
 
-        # Persist user message
-        await self._store_conversation_message(conversation_id, "user", current_message["content"])
-
         if not ("choices" in response and response["choices"]):
             return response
 
@@ -406,27 +662,87 @@ class OpenAIProvider(ImageProvider):
             return response
 
         assistant_message = choice["message"]
-        await self._store_conversation_message(
-            conversation_id, "assistant", assistant_message.get("content", "")
-        )
+        if not isinstance(assistant_message, dict):
+            raise ValueError("Assistant refinement response did not contain a message object.")
 
         if "tool_calls" not in assistant_message:
             return response
 
-        for tool_call in assistant_message["tool_calls"]:
-            if tool_call["function"]["name"] != "generate_image":
+        tool_calls = assistant_message["tool_calls"]
+        if not isinstance(tool_calls, list):
+            raise ValueError("Assistant refinement response contained invalid tool calls.")
+
+        for tool_call in tool_calls:
+            if not isinstance(tool_call, dict) or not isinstance(tool_call.get("function"), dict):
+                raise ValueError("Assistant refinement response contained an invalid tool call.")
+            function = tool_call["function"]
+            if function.get("name") != "generate_image":
                 continue
 
-            raw_args = tool_call["function"].get("arguments", {})
-            tool_args = json.loads(raw_args) if isinstance(raw_args, str) else (raw_args or {})
-            logger.info("Assistant refined prompt via tool call: %s", tool_args)
+            raw_args = function.get("arguments")
+            if isinstance(raw_args, str):
+                try:
+                    tool_args = json.loads(raw_args)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        "Assistant refinement returned malformed JSON arguments."
+                    ) from exc
+            else:
+                tool_args = raw_args
+            if not isinstance(tool_args, dict):
+                raise ValueError("Assistant refinement arguments must be a JSON object.")
+
+            unknown_fields = set(tool_args) - set(tool_schema_properties)
+            if unknown_fields:
+                raise ValueError(
+                    "Assistant refinement returned unsupported fields: "
+                    f"{', '.join(sorted(str(field) for field in unknown_fields))}."
+                )
+
+            refined_prompt_value = tool_args.get("prompt")
+            if not isinstance(refined_prompt_value, str) or not refined_prompt_value.strip():
+                raise ValueError("Assistant refinement returned an empty or invalid prompt.")
+            if len(refined_prompt_value) > OPENAI_MAX_PROMPT_LENGTH:
+                raise ValueError(
+                    "Assistant refinement prompt exceeds the OpenAI maximum of "
+                    f"{OPENAI_MAX_PROMPT_LENGTH} characters."
+                )
+            refined_prompt = refined_prompt_value
+
+            refined_size_value = tool_args.get("size", size)
+            if not isinstance(refined_size_value, str):
+                raise ValueError("Assistant refinement size must be a string.")
+            refined_quality_value = tool_args.get("quality", quality)
+            if refined_quality_value is not None and not isinstance(refined_quality_value, str):
+                raise ValueError("Assistant refinement quality must be a string.")
+            refined = await self.validate_params(
+                refined_prompt,
+                size=refined_size_value,
+                quality=refined_quality_value,
+                model=image_model,
+            )
+            refined_size = str(refined["size"])
+            refined_quality = refined.get("quality", quality)
+
+            settings = get_settings()
+            if settings.log_prompts:
+                logger.info("Assistant refined prompt via tool call: %s", tool_args)
+            else:
+                logger.info(
+                    "Assistant refined prompt via tool call: "
+                    "length=%d sha256=%s size=%s quality=%s",
+                    len(refined_prompt),
+                    hashlib.sha256(refined_prompt.encode("utf-8")).hexdigest(),
+                    tool_args.get("size"),
+                    tool_args.get("quality"),
+                )
 
             image_response = await self._call_images_generate_direct(
                 api_key=api_key,
                 model=image_model,
-                prompt=tool_args.get("prompt", prompt),
-                size=tool_args.get("size", size),
-                quality=tool_args.get("quality", quality),
+                prompt=refined_prompt,
+                size=refined_size,
+                quality=refined_quality,
                 output_format=output_format,
                 output_compression=output_compression,
                 background=background,
@@ -440,7 +756,7 @@ class OpenAIProvider(ImageProvider):
                 "chat_response": response,
                 "image_response": image_response,
                 "tool_calls": assistant_message["tool_calls"],
-                "refined_prompt": tool_args.get("prompt", prompt),
+                "refined_prompt": refined_prompt,
             }
 
         return response
@@ -457,33 +773,40 @@ class OpenAIProvider(ImageProvider):
         **kwargs: Any,
     ) -> dict[str, Any]:
         """Validate and normalize parameters for OpenAI."""
-        if len(prompt) > MAX_PROMPT_LENGTH:
-            raise ValueError(f"Prompt too long. Maximum {MAX_PROMPT_LENGTH} characters.")
+        if len(prompt) > OPENAI_MAX_PROMPT_LENGTH:
+            raise ValueError(
+                f"Prompt too long. Maximum {OPENAI_MAX_PROMPT_LENGTH} characters for OpenAI."
+            )
+
+        model = self._resolve_model(kwargs.get("openai_model") or kwargs.get("model"))
 
         # --- Size ---
         if size:
-            size = size.replace("X", "x")
-            # Accept Gemini-style sizes by mapping to the closest OpenAI size.
-            gemini_to_openai = {
-                "1K": "1024x1024",
-                "2K": "1536x1024",
-                "4K": "1792x1024",  # gpt-image-2 max, was 1536x1024 on 1.x
-            }
-            normalized = size.upper()
-            if normalized in gemini_to_openai:
-                mapped = gemini_to_openai[normalized]
-                logger.info(
-                    "Converting Gemini size '%s' to OpenAI size '%s' (max supported).",
-                    size,
-                    mapped,
-                )
-                size = mapped
-            if size not in OPENAI_SIZES:
-                raise ValueError(
-                    f"Invalid size '{size}' for OpenAI. Supported: {', '.join(OPENAI_SIZES)}"
-                )
+            size = self._validate_size(size, model)
+            if aspect_ratio:
+                expected_size = self._size_from_aspect_ratio(aspect_ratio, model)
+                if size == "auto":
+                    raise ValueError("size='auto' cannot be combined with an aspect_ratio.")
+                if self._is_gpt_image_2(model):
+                    requested_width, requested_height = self._parse_aspect_ratio(aspect_ratio)
+                    width, height = (int(part) for part in size.split("x"))
+                    if width * requested_height != height * requested_width:
+                        raise ValueError(
+                            f"size '{size}' conflicts with aspect_ratio '{aspect_ratio}'. "
+                            f"Use the exact derived size '{expected_size}' or omit one control."
+                        )
+                elif size != expected_size:
+                    raise ValueError(
+                        f"size '{size}' conflicts with aspect_ratio '{aspect_ratio}' for {model}. "
+                        f"The nearest supported size is '{expected_size}'."
+                    )
         else:
-            size = self._size_from_aspect_ratio(aspect_ratio) if aspect_ratio else "1024x1024"
+            inferred_size = (
+                self._size_from_aspect_ratio(aspect_ratio, model)
+                if aspect_ratio
+                else get_settings().default_openai_size
+            )
+            size = self._validate_size(inferred_size, model)
 
         # --- Enum validation (pass through to API if valid, else raise) ---
         validated: dict[str, Any] = {"prompt": prompt, "size": size}
@@ -513,12 +836,7 @@ class OpenAIProvider(ImageProvider):
 
         background = kwargs.get("background")
         if background is not None:
-            if background not in OPENAI_BACKGROUND_OPTIONS:
-                raise ValueError(
-                    f"Invalid background '{background}'. "
-                    f"Supported: {', '.join(OPENAI_BACKGROUND_OPTIONS)}"
-                )
-            validated["background"] = background
+            validated["background"] = self._validate_background(str(background), model)
 
         moderation = kwargs.get("moderation")
         if moderation is not None:
@@ -531,9 +849,9 @@ class OpenAIProvider(ImageProvider):
 
         style = kwargs.get("style")
         if style is not None:
-            if style not in OPENAI_STYLES:
-                raise ValueError(f"Invalid style '{style}'. Supported: {', '.join(OPENAI_STYLES)}")
-            validated["style"] = style
+            raise ValueError(
+                "style is only supported by DALL-E 3 and is unavailable on GPT Image models."
+            )
 
         n = kwargs.get("n")
         if n is not None:
@@ -544,19 +862,60 @@ class OpenAIProvider(ImageProvider):
 
         return validated
 
-    def _size_from_aspect_ratio(self, aspect_ratio: str) -> str:
-        """Convert an aspect ratio string to the closest OpenAI size."""
-        ratio_to_size = {
-            "1:1": "1024x1024",
-            "2:3": "1024x1536",
-            "3:2": "1536x1024",
-            "9:16": "1024x1792",
-            "16:9": "1792x1024",
-            "portrait": "1024x1536",
-            "landscape": "1536x1024",
-            "square": "1024x1024",
-        }
-        return ratio_to_size.get(aspect_ratio, "1024x1024")
+    @staticmethod
+    def _parse_aspect_ratio(aspect_ratio: str) -> tuple[int, int]:
+        """Return normalized ratio components or reject an unsupported ratio."""
+        normalized = aspect_ratio.strip().lower()
+        normalized = {
+            "portrait": "2:3",
+            "landscape": "3:2",
+            "square": "1:1",
+        }.get(normalized, normalized)
+        if normalized not in OPENAI_ASPECT_RATIOS:
+            raise ValueError(
+                f"Unsupported OpenAI aspect_ratio '{aspect_ratio}'. Supported: "
+                f"{', '.join(OPENAI_ASPECT_RATIOS)}, portrait, landscape, square. "
+                "Gemini-only extreme ratios such as 1:4 and 8:1 exceed OpenAI's 3:1 limit."
+            )
+        width, height = (int(part) for part in normalized.split(":"))
+        common = gcd(width, height)
+        return width // common, height // common
+
+    def _size_from_aspect_ratio(self, aspect_ratio: str, model: str) -> str:
+        """Convert a supported aspect ratio without silently changing its shape."""
+        ratio_width, ratio_height = self._parse_aspect_ratio(aspect_ratio)
+        if max(ratio_width, ratio_height) / min(ratio_width, ratio_height) > 3:
+            raise ValueError("OpenAI image aspect ratios must not exceed 3:1.")
+
+        if not self._is_gpt_image_2(model):
+            candidates = [size for size in OPENAI_LEGACY_SIZES if size != "auto"]
+            target = ratio_width / ratio_height
+            return min(
+                candidates,
+                key=lambda candidate: abs(
+                    int(candidate.split("x")[0]) / int(candidate.split("x")[1]) - target
+                ),
+            )
+
+        # Keep the shorter edge at least 1024px while preserving the exact
+        # reduced ratio and OpenAI's multiple-of-16 requirement.
+        short_component = min(ratio_width, ratio_height)
+        scale = (1024 + short_component * 16 - 1) // (short_component * 16)
+        width = ratio_width * 16 * scale
+        height = ratio_height * 16 * scale
+        return self._validate_size(f"{width}x{height}", model)
+
+    @staticmethod
+    def _aspect_ratio_from_size(size: str) -> str | None:
+        """Return the exact reduced ratio for a concrete WIDTHxHEIGHT size."""
+        parts = size.lower().split("x")
+        if len(parts) != 2 or not all(part.isdigit() for part in parts):
+            return None
+        width, height = (int(part) for part in parts)
+        if width <= 0 or height <= 0:
+            return None
+        common = gcd(width, height)
+        return f"{width // common}:{height // common}"
 
     # ------------------------------------------------------------------
     # Response parsing helpers
@@ -605,7 +964,8 @@ class OpenAIProvider(ImageProvider):
         aspect_ratio: str | None = None,
         conversation_id: str | None = None,
         reference_images: list[str] | None = None,
-        enable_enhancement: bool = True,
+        enable_enhancement: bool = False,
+        persist_conversation: bool = False,
         api_key: str | None = None,
         assistant_model: str = "gpt-5.1",
         input_image_file_id: str | None = None,
@@ -623,9 +983,10 @@ class OpenAIProvider(ImageProvider):
     ) -> ImageResult:
         """Generate an image using OpenAI gpt-image-2."""
         start_time = time.time()
-        image_model = self._resolve_model(openai_model)
+        image_model = openai_model or DEFAULT_OPENAI_IMAGE_MODEL
 
         try:
+            image_model = self._resolve_model(openai_model)
             api_key = self._get_api_key(api_key)
 
             # Validate and normalize
@@ -640,6 +1001,7 @@ class OpenAIProvider(ImageProvider):
                 moderation=moderation,
                 style=style,
                 n=n,
+                model=image_model,
             )
             size = str(validated["size"])
             quality = validated.get("quality", quality)
@@ -650,24 +1012,64 @@ class OpenAIProvider(ImageProvider):
             style = validated.get("style", style)
             n = validated.get("n", n)
 
-            conversation_id = conversation_id or self._generate_conversation_id()
+            explicit_extension = self._explicit_output_extension(output_path)
+            if explicit_extension is not None:
+                if explicit_extension not in OPENAI_OUTPUT_FORMATS:
+                    raise ValueError("Explicit output file must end in .png, .jpeg/.jpg, or .webp.")
+                if output_format is None:
+                    output_format = explicit_extension
+                elif explicit_extension != output_format:
+                    raise ValueError(
+                        f"output_path extension '.{explicit_extension}' does not match "
+                        f"openai_output_format '{output_format}'."
+                    )
+
+            if input_image_file_id is not None:
+                raise ValueError(
+                    "input_image_file_id is unsupported. Continue with the conversation_id "
+                    "returned by the prior generation, or use edit_image with a local file."
+                )
+
+            should_persist = persist_conversation or conversation_id is not None
+            previous_image_b64: str | None = None
+            if conversation_id is not None:
+                previous_image_b64 = await self._get_last_image_from_conversation(conversation_id)
+                if previous_image_b64 is None:
+                    raise ValueError(
+                        f"Conversation '{conversation_id}' has no prior image to refine."
+                    )
+            else:
+                conversation_id = self._generate_conversation_id()
+            planned_output_paths = self._plan_output_paths(output_path, n or 1)
 
             if reference_images:
-                logger.warning(
-                    "OpenAI provider does not accept reference_images on /images/generations. "
-                    "Use the edit_image tool for image-to-image editing."
+                raise ValueError(
+                    "OpenAI image generation cannot apply reference_images. "
+                    "Use edit_image for OpenAI image-to-image work or choose Gemini."
                 )
 
             # Pick the code path
             refined_prompt: str | None = None
-            if enable_enhancement:
-                result = await self._call_responses_api(
+            if previous_image_b64 is not None:
+                image_response = await self._call_images_edit_bytes(
+                    api_key=api_key,
+                    model=image_model,
+                    prompt=prompt,
+                    image_b64=previous_image_b64,
+                    size=size,
+                    quality=quality,
+                    output_format=output_format,
+                    output_compression=output_compression,
+                    background=background,
+                    n=n,
+                )
+            elif enable_enhancement:
+                result = await self._call_chat_completions_refinement(
                     prompt=prompt,
                     api_key=api_key,
                     conversation_id=conversation_id,
                     assistant_model=assistant_model,
                     image_model=image_model,
-                    input_image_file_id=input_image_file_id,
                     size=size,
                     quality=quality,
                     output_format=output_format,
@@ -703,26 +1105,36 @@ class OpenAIProvider(ImageProvider):
             response_revised: str | None = None
 
             valid_entries = [e for e in entries if "b64_json" in e]
-            if valid_entries:
-                # Save all images concurrently (each write is offloaded to a
-                # thread); asyncio.gather preserves order.
-                saved_paths = await asyncio.gather(
-                    *(
-                        self._save_image(entry["b64_json"], prompt, output_path)
-                        for entry in valid_entries
+            if not valid_entries:
+                raise ValueError("OpenAI returned no usable image data.")
+
+            image_extension = str(image_response.get("output_format") or output_format or "png")
+            # Save all images concurrently (each write is offloaded to a
+            # thread); asyncio.gather preserves order.
+            saved_paths = await asyncio.gather(
+                *(
+                    self._save_image(
+                        entry["b64_json"],
+                        prompt,
+                        planned_output_paths[index],
+                        extension=image_extension,
                     )
+                    for index, entry in enumerate(valid_entries)
                 )
-                image_path = saved_paths[0]
-                additional_paths = list(saved_paths[1:])
-                if valid_entries[0].get("revised_prompt"):
-                    response_revised = valid_entries[0]["revised_prompt"]
-                # Persist the first image to the conversation store for multi-turn.
-                await self._store_conversation_message(
+            )
+            image_path = saved_paths[0]
+            additional_paths = list(saved_paths[1:])
+            if valid_entries[0].get("revised_prompt"):
+                response_revised = valid_entries[0]["revised_prompt"]
+            # Persist the user instruction and first output for real edit
+            # chaining on the next conversational turn.
+            if should_persist:
+                await self._store_conversation_turn(
                     conversation_id,
-                    "assistant",
+                    prompt,
                     {"type": "image_generated", "prompt": prompt},
-                    image_base64=valid_entries[0]["b64_json"],
-                    metadata={
+                    valid_entries[0]["b64_json"],
+                    {
                         "size": size,
                         "model": image_model,
                         "quality": quality,
@@ -731,6 +1143,7 @@ class OpenAIProvider(ImageProvider):
                 )
 
             generation_time = time.time() - start_time
+            actual_size = str(image_response.get("size") or size)
 
             return ImageResult(
                 success=True,
@@ -740,26 +1153,91 @@ class OpenAIProvider(ImageProvider):
                 additional_paths=additional_paths or None,
                 prompt=prompt,
                 enhanced_prompt=refined_prompt or response_revised,
-                size=image_response.get("size") or size,
-                aspect_ratio=aspect_ratio,
+                size=actual_size,
+                aspect_ratio=self._aspect_ratio_from_size(actual_size),
                 quality=image_response.get("quality") or quality,
                 output_format=image_response.get("output_format") or output_format,
                 background=image_response.get("background") or background,
-                conversation_id=conversation_id,
+                conversation_id=conversation_id if should_persist else None,
                 timestamp=datetime.now(),
                 generation_time_seconds=generation_time,
                 usage_tokens=usage,
             )
 
         except Exception as e:
-            logger.exception("OpenAI image generation failed")
+            logger.error("OpenAI image generation failed error_type=%s", type(e).__name__)
+            provider_error = e if isinstance(e, ProviderError) else None
+            safe_error = (
+                provider_error.user_message
+                if provider_error
+                else str(e)
+                if isinstance(e, ValueError)
+                else "OpenAI image generation failed."
+            )
             return ImageResult(
                 success=False,
                 provider=self.name,
                 model=image_model,
                 prompt=prompt,
-                error=str(e),
+                error=safe_error,
+                error_code=provider_error.code if provider_error else None,
+                error_status=provider_error.status_code if provider_error else None,
+                error_request_id=provider_error.request_id if provider_error else None,
+                error_retryable=provider_error.retryable if provider_error else None,
             )
+
+    @staticmethod
+    def _validate_allowed_input_path(path: Path) -> None:
+        """Require local edit inputs to stay inside explicitly allowed roots."""
+        settings = get_settings()
+        if settings.allowed_input_roots:
+            roots = [Path(root).expanduser().resolve() for root in settings.allowed_input_roots]
+        else:
+            from ..config.paths import get_base_output_directory
+
+            roots = [get_base_output_directory().resolve()]
+
+        if not any(path == root or path.is_relative_to(root) for root in roots):
+            allowed = ", ".join(str(root) for root in roots)
+            raise ValueError(
+                f"Input path is outside IMAGEN_MCP_ALLOWED_INPUT_ROOTS. Allowed: {allowed}"
+            )
+
+    @staticmethod
+    def _read_validated_image(
+        path: Path, *, mask: bool = False
+    ) -> tuple[bytes, str, tuple[int, int]]:
+        """Read an actual bounded image, rejecting arbitrary-file uploads."""
+        from PIL import Image
+
+        if path.stat().st_size > 50 * 1024 * 1024:
+            raise ValueError(f"Input image exceeds the 50 MB limit: {path}")
+
+        image_bytes = path.read_bytes()
+        try:
+            with Image.open(io.BytesIO(image_bytes)) as image:
+                detected_format = (image.format or "").upper()
+                dimensions = image.size
+                image.verify()
+        except Exception as e:
+            raise ValueError(f"Input is not a valid image: {path}") from e
+
+        if mask:
+            if detected_format != "PNG" or path.suffix.lower() != ".png":
+                raise ValueError("Edit mask must be a valid PNG image.")
+            return image_bytes, "image/png", dimensions
+
+        mime_by_format = {"PNG": "image/png", "JPEG": "image/jpeg", "WEBP": "image/webp"}
+        suffix_by_format = {
+            "PNG": {".png"},
+            "JPEG": {".jpg", ".jpeg"},
+            "WEBP": {".webp"},
+        }
+        if detected_format not in mime_by_format:
+            raise ValueError("Edit source must be a PNG, JPEG, or WebP image.")
+        if path.suffix.lower() not in suffix_by_format[detected_format]:
+            raise ValueError("Edit source extension does not match its decoded image format.")
+        return image_bytes, mime_by_format[detected_format], dimensions
 
     async def edit_image(
         self,
@@ -778,25 +1256,33 @@ class OpenAIProvider(ImageProvider):
         api_key: str | None = None,
         output_path: str | None = None,
     ) -> ImageResult:
-        """Edit an image via /images/edits with gpt-image-2.
+        """Edit an image via /images/edits with a GPT Image model.
 
         This is the right entry point for image-to-image workflows on
-        OpenAI (reference-image-style consistency). Uses
-        ``input_fidelity='high'`` by default so unchanged pixels are
-        preserved.
+        OpenAI (reference-image-style consistency). gpt-image-2 already uses
+        high input fidelity, so the request omits ``input_fidelity``. Older
+        models retain the configurable legacy parameter.
         """
         start_time = time.time()
-        image_model = self._resolve_model(openai_model)
+        image_model = openai_model or DEFAULT_OPENAI_IMAGE_MODEL
 
         try:
+            image_model = self._resolve_model(openai_model)
             api_key = self._get_api_key(api_key)
 
-            # Validate size against the edits endpoint's narrower size list.
-            if size:
-                size = size.replace("X", "x")
+            # gpt-image-2 supports the same constrained arbitrary sizes for
+            # generation and editing.  Preserve the historical edits enum for
+            # callers that pin an older model.
+            if self._is_gpt_image_2(image_model):
+                size = self._validate_size(
+                    size or get_settings().default_openai_size,
+                    image_model,
+                )
+            elif size:
+                size = size.strip().replace("X", "x")
                 if size not in OPENAI_EDIT_SIZES:
                     raise ValueError(
-                        f"Invalid size '{size}' for /images/edits. "
+                        f"Invalid size '{size}' for /images/edits with {image_model}. "
                         f"Supported: {', '.join(OPENAI_EDIT_SIZES)}"
                     )
             else:
@@ -806,11 +1292,8 @@ class OpenAIProvider(ImageProvider):
                 raise ValueError(
                     f"Invalid quality '{quality}'. Supported: {', '.join(OPENAI_QUALITY_OPTIONS)}"
                 )
-            if background is not None and background not in OPENAI_BACKGROUND_OPTIONS:
-                raise ValueError(
-                    f"Invalid background '{background}'. "
-                    f"Supported: {', '.join(OPENAI_BACKGROUND_OPTIONS)}"
-                )
+            if background is not None:
+                background = self._validate_background(background, image_model)
             if (
                 openai_output_format is not None
                 and openai_output_format not in OPENAI_OUTPUT_FORMATS
@@ -819,13 +1302,33 @@ class OpenAIProvider(ImageProvider):
                     f"Invalid output_format '{openai_output_format}'. "
                     f"Supported: {', '.join(OPENAI_OUTPUT_FORMATS)}"
                 )
-            if input_fidelity is None:
-                input_fidelity = DEFAULT_OPENAI_INPUT_FIDELITY
-            if input_fidelity not in OPENAI_INPUT_FIDELITY_OPTIONS:
+            explicit_extension = self._explicit_output_extension(output_path)
+            if explicit_extension is not None:
+                if explicit_extension not in OPENAI_OUTPUT_FORMATS:
+                    raise ValueError("Explicit output file must end in .png, .jpeg/.jpg, or .webp.")
+                if openai_output_format is None:
+                    openai_output_format = explicit_extension
+                elif explicit_extension != openai_output_format:
+                    raise ValueError(
+                        f"output_path extension '.{explicit_extension}' does not match "
+                        f"openai_output_format '{openai_output_format}'."
+                    )
+            if input_fidelity is not None and input_fidelity not in OPENAI_INPUT_FIDELITY_OPTIONS:
                 raise ValueError(
                     f"Invalid input_fidelity '{input_fidelity}'. "
                     f"Supported: {', '.join(OPENAI_INPUT_FIDELITY_OPTIONS)}"
                 )
+            request_input_fidelity: str | None
+            if self._is_gpt_image_2(image_model):
+                request_input_fidelity = None
+                if input_fidelity is not None:
+                    logger.info(
+                        "Omitting input_fidelity=%s for gpt-image-2; "
+                        "inputs are always high fidelity.",
+                        input_fidelity,
+                    )
+            else:
+                request_input_fidelity = input_fidelity or DEFAULT_OPENAI_INPUT_FIDELITY
             if n is not None:
                 n = int(n)
                 if not (1 <= n <= OPENAI_MAX_N):
@@ -835,34 +1338,46 @@ class OpenAIProvider(ImageProvider):
             img_path = Path(image_path).expanduser().resolve()
             if not img_path.is_file():
                 raise ValueError(f"Source image not found: {img_path}")
+            self._validate_allowed_input_path(img_path)
+            if output_path:
+                requested_output = Path(output_path).expanduser().resolve()
+                if requested_output == img_path:
+                    raise ValueError("Edit output_path must not overwrite the source image.")
+            planned_output_paths = self._plan_output_paths(output_path, n or 1)
 
-            def _read_bytes(p: Path) -> bytes:
-                return p.read_bytes()
-
-            image_bytes = await asyncio.to_thread(_read_bytes, img_path)
+            image_bytes, image_mime, image_dimensions = await asyncio.to_thread(
+                self._read_validated_image, img_path
+            )
 
             mask_bytes: bytes | None = None
+            mask_mime: str | None = None
             if mask_path:
                 m_path = Path(mask_path).expanduser().resolve()
                 if not m_path.is_file():
                     raise ValueError(f"Mask not found: {m_path}")
-                mask_bytes = await asyncio.to_thread(_read_bytes, m_path)
+                self._validate_allowed_input_path(m_path)
+                mask_bytes, mask_mime, mask_dimensions = await asyncio.to_thread(
+                    self._read_validated_image, m_path, mask=True
+                )
+                if mask_dimensions != image_dimensions:
+                    raise ValueError("Edit mask dimensions must match the source image.")
 
             # Build multipart form
             files: dict[str, Any] = {
-                "image": (img_path.name, image_bytes, "application/octet-stream"),
+                "image": (img_path.name, image_bytes, image_mime),
             }
             if mask_bytes is not None:
-                files["mask"] = ("mask.png", mask_bytes, "image/png")
+                files["mask"] = ("mask.png", mask_bytes, mask_mime)
 
             form_data: dict[str, Any] = {
                 "model": image_model,
                 "prompt": prompt,
                 "size": size,
-                "input_fidelity": input_fidelity,
                 # gpt-image-2 returns b64_json in data[] by default;
                 # the legacy "response_format" param is not supported.
             }
+            if request_input_fidelity is not None:
+                form_data["input_fidelity"] = request_input_fidelity
             if quality is not None:
                 form_data["quality"] = quality
             if background is not None:
@@ -878,7 +1393,7 @@ class OpenAIProvider(ImageProvider):
                 "Calling /images/edits model=%s size=%s fidelity=%s n=%s",
                 image_model,
                 size,
-                input_fidelity,
+                request_input_fidelity or "automatic-high",
                 n or 1,
             )
             image_response = await self._make_api_request(
@@ -895,17 +1410,27 @@ class OpenAIProvider(ImageProvider):
             additional_paths: list[Path] = []
             response_revised: str | None = None
             valid_entries = [e for e in entries if "b64_json" in e]
-            if valid_entries:
-                saved_paths = await asyncio.gather(
-                    *(
-                        self._save_image(entry["b64_json"], prompt, output_path)
-                        for entry in valid_entries
+            if not valid_entries:
+                raise ValueError("OpenAI returned no usable edited image data.")
+
+            image_extension = str(
+                image_response.get("output_format") or openai_output_format or "png"
+            )
+            saved_paths = await asyncio.gather(
+                *(
+                    self._save_image(
+                        entry["b64_json"],
+                        prompt,
+                        planned_output_paths[index],
+                        extension=image_extension,
                     )
+                    for index, entry in enumerate(valid_entries)
                 )
-                saved_path = saved_paths[0]
-                additional_paths = list(saved_paths[1:])
-                if valid_entries[0].get("revised_prompt"):
-                    response_revised = valid_entries[0]["revised_prompt"]
+            )
+            saved_path = saved_paths[0]
+            additional_paths = list(saved_paths[1:])
+            if valid_entries[0].get("revised_prompt"):
+                response_revised = valid_entries[0]["revised_prompt"]
 
             generation_time = time.time() - start_time
 
@@ -927,13 +1452,25 @@ class OpenAIProvider(ImageProvider):
             )
 
         except Exception as e:
-            logger.exception("OpenAI image edit failed")
+            logger.error("OpenAI image edit failed error_type=%s", type(e).__name__)
+            provider_error = e if isinstance(e, ProviderError) else None
+            safe_error = (
+                provider_error.user_message
+                if provider_error
+                else str(e)
+                if isinstance(e, ValueError)
+                else "OpenAI image editing failed."
+            )
             return ImageResult(
                 success=False,
                 provider=self.name,
                 model=image_model,
                 prompt=prompt,
-                error=str(e),
+                error=safe_error,
+                error_code=provider_error.code if provider_error else None,
+                error_status=provider_error.status_code if provider_error else None,
+                error_request_id=provider_error.request_id if provider_error else None,
+                error_retryable=provider_error.retryable if provider_error else None,
             )
 
 

@@ -20,11 +20,11 @@ class Settings:
     # Defaults
     default_provider: str = "auto"  # auto, openai, gemini
     default_openai_size: str = "1024x1024"
-    default_gemini_size: str = "2K"
+    default_gemini_size: str = "1K"
     default_gemini_aspect_ratio: str = "1:1"
 
     # Feature flags
-    enable_prompt_enhancement: bool = True
+    enable_prompt_enhancement: bool = False
     enable_google_search: bool = False  # Gemini-only feature
 
     # Timeouts (seconds). Generous read ceiling for slow high-quality image
@@ -43,6 +43,8 @@ class Settings:
 
     # Output
     output_dir: str | None = None
+    allowed_input_roots: tuple[str, ...] = ()
+    conversation_retention_days: int = 30
 
     # Logging
     log_dir: str | None = None
@@ -71,10 +73,10 @@ class Settings:
             gemini_api_key=gemini_key,
             default_provider=os.getenv("DEFAULT_PROVIDER", "auto"),
             default_openai_size=os.getenv("DEFAULT_OPENAI_SIZE", "1024x1024"),
-            default_gemini_size=os.getenv("DEFAULT_GEMINI_SIZE", "2K"),
+            default_gemini_size=os.getenv("DEFAULT_GEMINI_SIZE", "1K"),
             default_gemini_aspect_ratio=os.getenv("DEFAULT_GEMINI_ASPECT_RATIO", "1:1"),
             enable_prompt_enhancement=(
-                os.getenv("ENABLE_PROMPT_ENHANCEMENT", "true").lower() == "true"
+                os.getenv("ENABLE_PROMPT_ENHANCEMENT", "false").lower() == "true"
             ),
             enable_google_search=os.getenv("ENABLE_GOOGLE_SEARCH", "false").lower() == "true",
             request_timeout=int(os.getenv("REQUEST_TIMEOUT", "600")),
@@ -85,6 +87,14 @@ class Settings:
             gemini_min_interval_seconds=float(os.getenv("GEMINI_MIN_INTERVAL_SECONDS", "0.5")),
             gemini_burst_limit=int(os.getenv("GEMINI_BURST_LIMIT", "5")),
             output_dir=os.getenv("OUTPUT_DIR"),
+            allowed_input_roots=tuple(
+                root
+                for root in os.getenv("IMAGEN_MCP_ALLOWED_INPUT_ROOTS", "").split(os.pathsep)
+                if root.strip()
+            ),
+            conversation_retention_days=int(
+                os.getenv("IMAGEN_MCP_CONVERSATION_RETENTION_DAYS", "30")
+            ),
             log_dir=log_dir,
             log_level=log_level,
             log_max_bytes=int(log_max_bytes),

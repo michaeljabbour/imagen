@@ -3,17 +3,18 @@
 For contributors building and maintaining the MCP image generation server.
 
 ## Project Structure & Module Organization
-- `src/server.py` is the MCP entry point exporting the registered tools.
+- `imagen_mcp` is the canonical package and `python -m imagen_mcp` is the MCP entry point. `src` is an identity-preserving compatibility namespace.
 - `src/providers/` holds provider implementations (`openai_provider.py`, `gemini_provider.py`), `selector.py` for auto-selection, and `registry.py` for factory wiring.
 - `src/config/` contains constants and settings; `src/models/input_models.py` defines Pydantic request models.
-- Tests live in `tests/` mirroring modules (`test_selector.py`, `test_providers.py`, `test_server.py`); `run.sh` is the wrapper used by MCP clients; dependencies sit in `requirements.txt` and `dev-requirements.txt`.
+- Tests live in `tests/` mirroring modules (`test_selector.py`, `test_providers.py`, `test_server.py`); `run.sh` is the wrapper used by MCP clients; dependencies are declared in `pyproject.toml`.
 
 ## Build, Test, and Development Commands
-- Create a venv and install deps: `python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt -r dev-requirements.txt`.
-- Run the server locally: `python -m src.server` (or `./run.sh` when invoked by clients); export `OPENAI_API_KEY`/`GEMINI_API_KEY` first.
-- Format and lint: `ruff format . && ruff check . --fix`.
-- Type check: `mypy src`.
-- Tests: `pytest` (verbosity and discovery configured in `pytest.ini`).
+- Install locked development dependencies: `uv sync --extra dev`.
+- Run the server locally: `uv run python -m imagen_mcp` (or `./run.sh` when invoked by clients); export at least one provider API key first.
+- Format and lint: `uv run ruff format imagen_mcp src tests && uv run ruff check imagen_mcp src tests`.
+- Type check: `uv run mypy imagen_mcp src`.
+- Tests: `uv run pytest` (verbosity and discovery configured in `pytest.ini`).
+- Build and smoke distributions: `uv build`, then clean-install the wheel/sdist and run `tests/installed_distribution_smoke.py` outside the checkout.
 
 ## Coding Style & Naming Conventions
 - Python 3.10+; Ruff line length 100; prefer explicit imports and typed signatures (mypy is strict: no implicit Optional, no untyped defs).

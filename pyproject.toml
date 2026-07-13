@@ -1,19 +1,20 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "imagen-mcp"
-version = "0.3.0"
+version = "0.4.0"
 authors = [
-  { name="Michael Jabbour", email="michael@example.com" },
+  { name = "Michael J. Jabbour" },
 ]
 description = "A Model Context Protocol (MCP) server for intelligent multi-provider image generation"
 readme = "README.md"
 requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
 classifiers = [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
 # Runtime dependencies.
@@ -26,12 +27,18 @@ classifiers = [
 # was removed from the dependency set in v0.3.x because it was never
 # imported (see MODERNIZATION_PLAN.md Phase 8).
 dependencies = [
-    "mcp>=1.26.0",
+    "mcp>=1.26.0,<2",
     "pydantic>=2.12.3",
     "httpx>=0.28.0",
     "google-genai>=2.8.0",
     "pillow>=11.0.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/michaeljabbour/imagen-mcp"
+Repository = "https://github.com/michaeljabbour/imagen-mcp.git"
+Issues = "https://github.com/michaeljabbour/imagen-mcp/issues"
+Changelog = "https://github.com/michaeljabbour/imagen-mcp/blob/v0.4.0/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = [
@@ -46,14 +53,15 @@ dev = [
 ]
 
 [project.scripts]
-imagen-mcp = "src.server:main"
-imagen-mcp-cli = "src.cli:main"
+imagen-mcp = "imagen_mcp.server:main"
+imagen-mcp-cli = "imagen_mcp.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["src*"]
+include = ["imagen_mcp*", "src*"]
 
 [tool.setuptools.package-data]
 src = ["py.typed"]
+imagen_mcp = ["py.typed"]
 
 [tool.ruff]
 line-length = 100

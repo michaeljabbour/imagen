@@ -1,12 +1,11 @@
 """Approximate image-generation pricing for cost estimation.
 
-These figures are **estimates** intended to help callers compare the
-relative cost of providers/qualities before committing to a generation.
-They are not billing-accurate: real cost depends on live provider pricing,
-token usage (OpenAI gpt-image-2 bills image *output tokens*), and any
-account-specific discounts. Always treat the output as a ballpark.
+These figures are published examples intended to help callers compare
+provider/model/quality combinations before generation. They are not a billing
+calculator: undocumented combinations return unavailable rather than being
+extrapolated, and live pricing or account-specific terms may differ.
 
-Sources (as of 2026-06): OpenAI gpt-image pricing tiers and Google
+Sources (as of 2026-07): OpenAI gpt-image pricing tiers and Google
 Gemini image pricing pages. Update ``PRICING`` when providers change rates.
 """
 
@@ -14,39 +13,24 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-# OpenAI gpt-image-* — approximate USD per image by quality tier.
-# A size multiplier scales the square baseline for larger canvases.
-_OPENAI_QUALITY_USD: dict[str, float] = {
-    "low": 0.011,
-    "medium": 0.042,
-    "high": 0.167,
-    # "auto"/"standard"/"hd" map onto the medium tier for estimation.
-    "auto": 0.042,
-    "standard": 0.042,
-    "hd": 0.167,
+from .constants import GEMINI_MODEL_ALIASES, GEMINI_MODELS
+
+# Published per-image examples. Do not extrapolate arbitrary-resolution costs:
+# provider billing is not documented as a linear pixel multiplier.
+_OPENAI_GPT_IMAGE_2_USD: dict[str, dict[str, float]] = {
+    "1024x1024": {"low": 0.006, "medium": 0.053, "high": 0.211},
+    "1024x1536": {"low": 0.005, "medium": 0.041, "high": 0.165},
+    "1536x1024": {"low": 0.005, "medium": 0.041, "high": 0.165},
 }
 
-_OPENAI_SIZE_MULTIPLIER: dict[str, float] = {
-    "256x256": 0.5,
-    "512x512": 0.7,
-    "1024x1024": 1.0,
-    "1024x1536": 1.5,
-    "1536x1024": 1.5,
-    "1024x1792": 1.75,
-    "1792x1024": 1.75,
-    "auto": 1.0,
+_GEMINI_FLASH_USD: dict[str, float] = {
+    "0.5K": 0.045,
+    "1K": 0.067,
+    "2K": 0.101,
+    "4K": 0.151,
 }
-
-# Gemini (Nano Banana family) — approximate USD per image by resolution.
-_GEMINI_SIZE_USD: dict[str, float] = {
-    "1K": 0.020,
-    "2K": 0.039,
-    "4K": 0.120,
-}
-
-# Pro tier (Nano Banana Pro / gemini-3-pro-image-preview) costs more.
-_GEMINI_PRO_MULTIPLIER = 1.8
-_GEMINI_PRO_MODEL_MARKERS = ("pro",)
+_GEMINI_PRO_USD: dict[str, float] = {"1K": 0.134, "2K": 0.134, "4K": 0.240}
+_GEMINI_LITE_USD: dict[str, float] = {"1K": 0.0336}
 
 
 @dataclass
@@ -64,24 +48,43 @@ class CostEstimate:
     note: str | None = None
 
 
-def _estimate_openai(quality: str | None, size: str | None) -> tuple[float | None, str | None]:
+def _estimate_openai(
+    model: str | None, quality: str | None, size: str | None
+) -> tuple[float | None, str | None]:
+    resolved_model = model or "gpt-image-2"
+    if resolved_model != "gpt-image-2":
+        return None, f"No documented local pricing table for OpenAI model '{resolved_model}'"
+
     q = (quality or "auto").lower()
     s = (size or "1024x1024").lower().replace("X", "x")
-    base = _OPENAI_QUALITY_USD.get(q)
-    if base is None:
-        return None, f"Unknown quality '{quality}' for OpenAI"
-    mult = _OPENAI_SIZE_MULTIPLIER.get(s, 1.0)
-    return round(base * mult, 4), None
+    prices = _OPENAI_GPT_IMAGE_2_USD.get(s)
+    if prices is None:
+        return None, (
+            f"No documented sample price for gpt-image-2 size '{size or s}'; "
+            "cost is not extrapolated from pixel count"
+        )
+    price = prices.get(q)
+    if price is None:
+        return None, f"No documented sample price for gpt-image-2 quality '{quality or q}'"
+    return price, None
 
 
 def _estimate_gemini(model: str | None, size: str | None) -> tuple[float | None, str | None]:
-    s = (size or "2K").upper()
-    base = _GEMINI_SIZE_USD.get(s)
-    if base is None:
-        return None, f"Unknown size '{size}' for Gemini"
-    if model and any(marker in model.lower() for marker in _GEMINI_PRO_MODEL_MARKERS):
-        base *= _GEMINI_PRO_MULTIPLIER
-    return round(base, 4), None
+    s = (size or "1K").upper()
+    requested_model = model or "gemini-3.1-flash-image"
+    resolved_model = GEMINI_MODEL_ALIASES.get(requested_model, requested_model)
+    if resolved_model not in GEMINI_MODELS:
+        return None, f"Unsupported Gemini image model '{requested_model}'"
+    if resolved_model == "gemini-3.1-flash-lite-image":
+        prices = _GEMINI_LITE_USD
+    elif resolved_model == "gemini-3-pro-image":
+        prices = _GEMINI_PRO_USD
+    else:
+        prices = _GEMINI_FLASH_USD
+    price = prices.get(s)
+    if price is None:
+        return None, f"No documented price for Gemini model '{requested_model}' at size '{s}'"
+    return price, None
 
 
 def estimate_generation_cost(
@@ -102,7 +105,7 @@ def estimate_generation_cost(
     n = max(1, int(n))
 
     if provider == "openai":
-        per_image, note = _estimate_openai(quality, size)
+        per_image, note = _estimate_openai(model, quality, size)
     elif provider == "gemini":
         per_image, note = _estimate_gemini(model, size)
     else:

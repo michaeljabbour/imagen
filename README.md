@@ -8,6 +8,30 @@ A Model Context Protocol (MCP) server for intelligent multi-provider image gener
 
 ## Quick Start
 
+Version 0.4.0 is released as the immutable `v0.4.0` Git tag and is not
+published on PyPI. Install it from that tag or a local checkout, then run the
+canonical module or console script:
+
+```bash
+git clone https://github.com/michaeljabbour/imagen-mcp.git
+cd imagen-mcp
+python3 -m pip install .
+python -m imagen_mcp
+# equivalent after installation: imagen-mcp
+```
+
+For a reproducible VCS install, use the release tag:
+
+```bash
+python3 -m pip install \
+  "imagen-mcp @ git+https://github.com/michaeljabbour/imagen-mcp.git@v0.4.0"
+```
+
+The historical `python -m src.server` entry point remains available for
+compatibility in 0.4.x.
+
+See [`CHANGELOG.md`](CHANGELOG.md) for release details and migration notes.
+
 **1. Get an API key** (at least one):
 
 | Provider | Get a key at | Environment variable |
@@ -15,7 +39,11 @@ A Model Context Protocol (MCP) server for intelligent multi-provider image gener
 | OpenAI | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) | `OPENAI_API_KEY` |
 | Google Gemini | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) | `GEMINI_API_KEY` |
 
-> Having **both** keys gives you the best results — the server automatically picks the right provider for each prompt. With only one key, prompts better suited for the other provider will still work, but you'll see a fallback notice.
+> Having **both** keys lets auto-selection use either provider. With only one
+> key, soft preferences may fall back with a notice. An unavailable explicit
+> provider pin fails closed; in auto mode, Gemini-only requirements such as
+> reference images and Google Search grounding also fail closed rather than
+> silently dropping the requested capability.
 
 **2. Add to your MCP client** (pick one):
 
@@ -26,7 +54,7 @@ A Model Context Protocol (MCP) server for intelligent multi-provider image gener
 claude mcp add -s user imagen \
   -e OPENAI_API_KEY=sk-... \
   -e GEMINI_API_KEY=AI... \
-  -- npx -y imagen-mcp
+  -- imagen-mcp
 ```
 
 Verify it's registered:
@@ -50,8 +78,8 @@ Edit the config file:
 {
   "mcpServers": {
     "imagen": {
-      "command": "npx",
-      "args": ["-y", "imagen-mcp"],
+      "command": "imagen-mcp",
+      "args": [],
       "env": {
         "OPENAI_API_KEY": "sk-...",
         "GEMINI_API_KEY": "AI..."
@@ -73,15 +101,14 @@ Reference: [Claude Desktop MCP docs](https://modelcontextprotocol.io/quickstart/
 Option A — CLI command:
 
 ```bash
-codex mcp add imagen -- npx -y imagen-mcp
+codex mcp add imagen -- imagen-mcp
 ```
 
 Option B — edit `~/.codex/config.toml` directly:
 
 ```toml
 [mcp_servers.imagen]
-command = "npx"
-args = ["-y", "imagen-mcp"]
+command = "imagen-mcp"
 
 [mcp_servers.imagen.env]
 OPENAI_API_KEY = "sk-..."
@@ -101,8 +128,8 @@ Edit `~/.gemini/settings.json`:
 {
   "mcpServers": {
     "imagen": {
-      "command": "npx",
-      "args": ["-y", "imagen-mcp"],
+      "command": "imagen-mcp",
+      "args": [],
       "env": {
         "OPENAI_API_KEY": "sk-...",
         "GEMINI_API_KEY": "AI..."
@@ -121,8 +148,8 @@ Reference: [Gemini CLI MCP docs](https://geminicli.com/docs/tools/mcp-server/)
 
 | Setting | Value |
 |---------|-------|
-| Command | `npx` |
-| Args | `["-y", "imagen-mcp"]` |
+| Command | `imagen-mcp` |
+| Args | `[]` |
 | Environment | `OPENAI_API_KEY` and/or `GEMINI_API_KEY` |
 
 </details>
@@ -131,14 +158,16 @@ Reference: [Gemini CLI MCP docs](https://geminicli.com/docs/tools/mcp-server/)
 
 > "Generate a professional headshot with studio lighting"
 
-That's it. The server picks the best provider automatically.
+That's it. The server picks a provider automatically and uses Gemini 3.1 Flash
+Image when Gemini is selected unless you explicitly request another Gemini
+model.
 
 ---
 
 ## Features
 
 - **Auto Provider Selection** — analyzes prompts to choose the best provider
-- **Multi-Provider Support** — OpenAI GPT-Image-1 and Google Gemini
+- **Multi-Provider Support** — OpenAI gpt-image-2 and Google Gemini 3 Image
 - **Reference Images** — up to 14 images for character/style consistency (Gemini)
 - **Real-time Data** — Google Search grounding for current info (Gemini)
 - **Conversational Refinement** — iteratively refine images with context
@@ -167,22 +196,33 @@ generate_image(prompt="...", provider="openai")
 generate_image(prompt="...", provider="gemini")
 ```
 
+Explicit provider pins never fall back. In auto mode, hard Gemini requirements
+(reference images, Google Search grounding, and recognized real-time-data
+requests) also fail if Gemini is unavailable. Soft quality preferences may
+fall back to the configured provider and include a notice.
+
 ## Provider Comparison
 
-| Feature | OpenAI GPT-Image-1 | Gemini Nano Banana Pro |
+| Feature | OpenAI gpt-image-2 | Gemini 3 Image |
 |---------|-------------------|------------------------|
 | Text Rendering | Excellent | Good |
 | Photorealism | Good | Excellent |
-| Speed | ~60s | ~15s |
-| Max Resolution | 1536x1024 | 4K |
-| Sizes | 3 options | 1K, 2K, 4K |
-| Aspect Ratios | 3 | 10 |
-| Reference Images | No | Yes (up to 14) |
+| Latency | Varies by size/quality | Varies by model/size |
+| Max Resolution | 3840px edge / 8,294,400 pixels | 4K |
+| Sizes | Constrained custom `WIDTHxHEIGHT` | 1K, 2K, 4K; Flash also 0.5K |
+| Aspect Ratios | Up to 3:1 | 10 baseline presets; 14 on Gemini 3.1 Flash/Flash Lite |
+| Reference Images | Via `edit_image` | Yes (model-specific, up to 14) |
 | Real-time Data | No | Yes (Google Search) |
 
 **Use OpenAI for:** text-heavy images, menus, infographics, comics, diagrams
 
 **Use Gemini for:** portraits, product photography, 4K output, reference images
+
+For `gpt-image-2`, both edges must be multiples of 16 and no larger than
+3840px, the long-to-short ratio must be at most 3:1, and total pixels must be
+between 655,360 and 8,294,400. Outputs above 2560x1440 are experimental.
+`gpt-image-2` does not support transparent backgrounds; use an opaque output
+and a downstream background-removal step.
 
 ## MCP Tools
 
@@ -223,7 +263,7 @@ Set `OUTPUT_DIR` to change the base directory globally. Logs go to `{OUTPUT_DIR}
 generate_image(prompt="...", size="4K")
 
 # Specific model
-generate_image(prompt="...", gemini_model="gemini-2.0-flash-exp-image-generation")
+generate_image(prompt="...", gemini_model="gemini-3.1-flash-image")
 
 # Reference images for style/character consistency (base64 encoded)
 generate_image(prompt="...", reference_images=["base64..."])
@@ -232,23 +272,32 @@ generate_image(prompt="...", reference_images=["base64..."])
 generate_image(prompt="Current weather in NYC", enable_google_search=True)
 ```
 
+Search grounding requires Markdown output and a client that renders the returned
+Google Search Suggestions HTML plus associated source links. JSON output fails
+before calling Gemini because escaped HTML is not a compliant rendered surface.
+
 ## Available Models
 
 ### OpenAI
 
 | Model ID | Description |
 |----------|-------------|
-| `gpt-image-1` | Dedicated image generation model (default) |
-| `gpt-5-image` | GPT-5 with image generation capabilities |
-| `gpt-5.1` | Latest reasoning model (conversation orchestration) |
+| `gpt-image-2` | Default image generation and editing model |
+| `gpt-image-1.5` | Legacy compatibility model |
+| `gpt-image-1` | Legacy compatibility model |
 
 ### Gemini
 
 | Model ID | Description |
 |----------|-------------|
-| `gemini-3-pro-image-preview` | Nano Banana Pro - highest quality (default) |
-| `gemini-2.0-flash-exp-image-generation` | Fast experimental |
-| `imagen-3.0-generate-002` | Alternative image model |
+| `gemini-3.1-flash-image` | Nano Banana 2; default GA model, 0.5K/1K/2K/4K |
+| `gemini-3-pro-image` | Nano Banana Pro; GA model, 1K/2K/4K |
+| `gemini-3.1-flash-lite-image` | Nano Banana Lite; 1K only, no Search, up to 14 object references |
+
+Retired `*-preview` IDs are rejected with an actionable GA migration message;
+explicit model pins never silently change. Gemini 3.1 Flash Lite Image outputs include SynthID and C2PA
+provenance metadata; downstream transforms should preserve that metadata when
+the file format and processing pipeline allow it.
 
 ## Architecture
 
@@ -277,8 +326,8 @@ flowchart TB
         end
 
         subgraph Providers["Image Providers"]
-            OAI[OpenAI Provider<br/>GPT-Image-1]
-            GEM[Gemini Provider<br/>Nano Banana Pro]
+            OAI[OpenAI Provider<br/>gpt-image-2]
+            GEM[Gemini Provider<br/>Gemini 3.1 Flash Image]
         end
     end
 
@@ -306,12 +355,15 @@ flowchart TB
 | Variable | Description | Required |
 |----------|-------------|----------|
 | `OPENAI_API_KEY` | OpenAI API key | At least one API key |
-| `GEMINI_API_KEY` | Google Gemini API key | is required |
+| `GEMINI_API_KEY` | Google Gemini API key | At least one API key |
 | `GOOGLE_API_KEY` | Alias for `GEMINI_API_KEY` | |
 | `OUTPUT_DIR` | Base directory for saved images | No (default: `~/Downloads/images/`) |
+| `IMAGEN_MCP_ALLOWED_INPUT_ROOTS` | OS-path-separator list of roots that `edit_image` may read; defaults to `OUTPUT_DIR` only | No |
+| `IMAGEN_MCP_CONVERSATION_RETENTION_DAYS` | Delete persisted conversational history after this many inactive days; `0` disables cleanup | No (default: `30`) |
 | `DEFAULT_PROVIDER` | Force a default provider | No (default: `auto`) |
 | `DEFAULT_OPENAI_SIZE` | Default OpenAI image size | No (default: `1024x1024`) |
-| `DEFAULT_GEMINI_SIZE` | Default Gemini image size | No (default: `2K`) |
+| `DEFAULT_GEMINI_SIZE` | Default Gemini image size | No (default: `1K`) |
+| `ENABLE_PROMPT_ENHANCEMENT` | Opt in to prompt enhancement; adds an assistant-model API call, latency, and cost before generation | No (default: `false`) |
 | `ENABLE_GOOGLE_SEARCH` | Enable Google Search grounding | No (default: `false`) |
 | `REQUEST_TIMEOUT` | Read-timeout ceiling in seconds for provider calls (covers slow high-quality renders) | No (default: `600`) |
 | `OPENAI_RPM` / `OPENAI_MIN_INTERVAL_SECONDS` / `OPENAI_BURST_LIMIT` | OpenAI client-side rate limits | No (defaults: `10` / `0.5` / `5`) |
@@ -333,8 +385,11 @@ You're probably missing `GEMINI_API_KEY`. The server fell back to OpenAI and sho
 **Images generate but text looks bad**
 You're probably missing `OPENAI_API_KEY`. Add an OpenAI key for better text rendering.
 
-**"npx: command not found"**
-Install Node.js (which includes npx): [nodejs.org](https://nodejs.org/)
+**"imagen-mcp: command not found"**
+Ensure the Python environment used by your MCP client has `imagen-mcp`
+installed from a local checkout or pinned VCS revision and its scripts directory
+is on `PATH`. As a fallback, configure the command as `python` with args `-m`,
+`imagen_mcp`.
 
 **Where are my images saved?**
 Default: `~/Downloads/images/openai/` or `~/Downloads/images/gemini/`. Check the tool output for the exact path. Set `OUTPUT_DIR` to change this.
@@ -342,7 +397,7 @@ Default: `~/Downloads/images/openai/` or `~/Downloads/images/gemini/`. Check the
 **How do I check which providers are active?**
 Use the `list_providers` tool, or run:
 ```bash
-python3 -c "from src.providers import get_provider_registry; print(get_provider_registry().list_providers())"
+python3 -c "from imagen_mcp.providers import get_provider_registry; print(get_provider_registry().list_providers())"
 ```
 
 ## Development
@@ -357,13 +412,14 @@ pip install -e ".[dev]"          # or: uv sync --extra dev
 pre-commit install
 
 # Run the full quality gate (same as CI)
-ruff format --check src/ tests/
-ruff check src/ tests/
-mypy src/
+ruff format --check imagen_mcp/ src/ tests/
+ruff check imagen_mcp/ src/ tests/
+mypy imagen_mcp/ src/
 pytest --cov=src --cov-fail-under=80
 
 # Verify server loads
-python3 -c "from src.server import mcp; print('Server loads')"
+python3 -c "from imagen_mcp.server import mcp; print('Server loads')"
+python3 -m imagen_mcp
 
 # Run over HTTP instead of stdio
 IMAGEN_MCP_TRANSPORT=streamable-http imagen-mcp
@@ -376,8 +432,9 @@ tail -f ~/Library/Logs/Claude/mcp-server-imagen.log
 
 ```
 imagen-mcp/
+├── imagen_mcp/               # Canonical package namespace + module runner
 ├── src/
-│   ├── server.py              # MCP entry point
+│   ├── server.py              # Implementation + legacy import path
 │   ├── config/
 │   │   ├── constants.py       # Provider constants
 │   │   └── settings.py        # Environment configuration
@@ -405,17 +462,16 @@ imagen-mcp/
 ## Requirements
 
 ```
-mcp>=1.16.0
-fastmcp>=2.12.5
+mcp>=1.26.0,<2
 pydantic>=2.12.3
-httpx>=0.24.0
-google-genai>=1.52.0
-pillow>=10.4.0
+httpx>=0.28.0
+google-genai>=2.8.0
+pillow>=11.0.0
 ```
 
 ## License
 
-MIT
+[MIT](LICENSE)
 
 ## Sources
 
