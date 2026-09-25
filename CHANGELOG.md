@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Amplifier Smart Tool surface (`src/smart_tool/`, `SMART_TOOL.md`,
+  `smart-tool.json`): a `imagen-mcp-smart` CLI/library exposing
+  `generate-image`, `edit-image`, `list-providers`, and `estimate-cost`,
+  reusing the existing `src.providers` code -- no generation logic is
+  reimplemented. Passes the spec's 16-rule conformance kit.
+- Model-agnostic resolution (`src/smart_tool/model_resolution.py`): explicit
+  choice > a user-editable `~/.config/imagen-mcp/models.yaml` (aliases plus
+  `openai`/`gemini: latest`) > live discovery of the newest model from each
+  provider's own models API > a cached last-known-good > a hardcoded
+  fallback. `OpenAIProvider._resolve_model` / `GeminiProvider._resolve_model_id`
+  gained an `allow_unknown` parameter (default `False`, MCP server behavior
+  unchanged) so the smart tool can pass an unrecognized-but-live model id
+  through to the provider's API instead of rejecting it against the static
+  registry.
+
 ## 0.4.0 - 2026-07-13
 
 - Validate Gemini response bytes and normalize JPEG/WebP payloads to genuine

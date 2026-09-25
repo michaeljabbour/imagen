@@ -67,6 +67,16 @@ class TestOpenAIProvider:
             with pytest.raises(ValueError, match="Unsupported OpenAI image model"):
                 provider._resolve_model(unsupported)
 
+    def test_resolve_model_allow_unknown_passes_through(self):
+        """allow_unknown=True defers rejection to the API (smart-tool path)."""
+        provider = OpenAIProvider()
+        assert (
+            provider._resolve_model("gpt-image-99-future", allow_unknown=True)
+            == "gpt-image-99-future"
+        )
+        # Known models are unaffected either way.
+        assert provider._resolve_model("gpt-image-2", allow_unknown=True) == "gpt-image-2"
+
     @pytest.mark.asyncio
     async def test_validate_params_accepts_new_options(self):
         """validate_params should accept and echo back 2.0 parameters."""
@@ -212,6 +222,18 @@ class TestGeminiProvider:
         with pytest.raises(ValueError, match="Unsupported Gemini image model"):
             provider._resolve_model_id("bogus-model-xyz")
         assert provider._resolve_model_id(None) == DEFAULT_GEMINI_IMAGE_MODEL
+
+    def test_resolve_model_id_allow_unknown_passes_through(self):
+        """allow_unknown=True defers rejection to the API (smart-tool path)."""
+        provider = GeminiProvider()
+        assert (
+            provider._resolve_model_id("gemini-9000-future-image", allow_unknown=True)
+            == "gemini-9000-future-image"
+        )
+        # Retired preview ids still fail even with allow_unknown=True -- that
+        # migration is a real, intentional rejection, not a static-registry gap.
+        with pytest.raises(ValueError, match="retired"):
+            provider._resolve_model_id("gemini-3.1-flash-image-preview", allow_unknown=True)
 
     def test_imagen_models_removed(self):
         """Imagen 4 models were removed in v0.3.0 and must not appear in the registry."""

@@ -184,9 +184,22 @@ class GeminiProvider(ImageProvider):
             )
 
         model_id = str(kwargs.get("model_id") or DEFAULT_GEMINI_IMAGE_MODEL)
+        allow_unknown_model = bool(kwargs.get("allow_unknown_model", False))
         model_meta = GEMINI_MODELS.get(model_id)
         if model_meta is None:
-            raise ValueError(f"Unsupported Gemini image model '{model_id}'.")
+            if not allow_unknown_model:
+                raise ValueError(f"Unsupported Gemini image model '{model_id}'.")
+            # A model resolved via explicit caller choice or live discovery
+            # (see ``src.smart_tool.model_resolution``) that isn't in the
+            # static registry yet. Fall back to permissive family-wide
+            # defaults and let the API reject anything it doesn't support.
+            model_meta = {
+                "supported_sizes": GEMINI_SIZES,
+                "default_size": "1K",
+                "max_reference_images": GEMINI_MAX_REFERENCE_IMAGES,
+                "supports_google_search": True,
+                "supported_thinking_levels": [],
+            }
         supported_sizes = cast("list[str]", model_meta["supported_sizes"])
 
         # Validate/normalize size (must be uppercase K)
@@ -264,7 +277,7 @@ class GeminiProvider(ImageProvider):
             "thinking_level": thinking_level,
         }
 
-    def _resolve_model_id(self, model: str | None) -> str:
+    def _resolve_model_id(self, model: str | None, *, allow_unknown: bool = False) -> str:
         """Resolve a user-provided model name/alias to a canonical Gemini
         model identifier.
 
@@ -274,8 +287,14 @@ class GeminiProvider(ImageProvider):
         - a friendly alias from ``GEMINI_MODEL_ALIASES`` (e.g. ``"nano-banana-2"``),
         - ``None`` (returns the default).
 
-        Unknown names are rejected so a typo never silently bills a different
-        model. Retired preview identifiers fail with an actionable GA migration.
+        Unknown names are rejected by default so a typo never silently bills
+        a different model. Retired preview identifiers always fail with an
+        actionable GA migration, even when ``allow_unknown=True``. Callers
+        that already resolved ``model`` themselves (explicit user choice, or
+        a model discovered live from Gemini's own models API -- see
+        ``src.smart_tool.model_resolution``) may pass ``allow_unknown=True``
+        to pass an unrecognized id through unchanged, deferring rejection to
+        the API itself.
         """
         if not model:
             return DEFAULT_GEMINI_IMAGE_MODEL
@@ -292,6 +311,10 @@ class GeminiProvider(ImageProvider):
             return GEMINI_MODEL_ALIASES[model]
 
         if model in GEMINI_MODELS:
+            return model
+
+        if allow_unknown:
+            logger.info("Passing unrecognized Gemini image model '%s' through to the API.", model)
             return model
 
         raise ValueError(
@@ -513,6 +536,7 @@ class GeminiProvider(ImageProvider):
         api_key: str | None = None,
         model: str | None = None,
         output_path: str | None = None,
+        allow_unknown_model: bool = False,
         **kwargs: Any,
     ) -> ImageResult:
         """Generate an image using Gemini.
@@ -524,7 +548,7 @@ class GeminiProvider(ImageProvider):
         start_time = time.time()
 
         try:
-            model_id = self._resolve_model_id(model)
+            model_id = self._resolve_model_id(model, allow_unknown=allow_unknown_model)
             explicit_extension = self._explicit_output_extension(output_path)
             if explicit_extension not in (None, "png"):
                 raise ValueError("Gemini output files must use a .png extension.")
@@ -542,6 +566,7 @@ class GeminiProvider(ImageProvider):
                 model_id=model_id,
                 reference_images=reference_images,
                 enable_google_search=enable_google_search,
+                allow_unknown_model=allow_unknown_model,
                 **kwargs,
             )
             size = validated["size"]
@@ -570,7 +595,15 @@ class GeminiProvider(ImageProvider):
                     raise ValueError(
                         f"Conversation '{requested_conversation_id}' has no prior image to refine."
                     )
-                max_references = int(GEMINI_MODELS[model_id]["max_reference_images"])
+                # ``model_id`` may be unrecognized when resolved with
+                # ``allow_unknown=True`` (a newly discovered model not yet in
+                # the static registry) -- fall back to the family-wide cap.
+                _model_meta = GEMINI_MODELS.get(model_id)
+                max_references = (
+                    cast("int", _model_meta["max_reference_images"])
+                    if _model_meta is not None
+                    else GEMINI_MAX_REFERENCE_IMAGES
+                )
                 if last_image_b64 and len(reference_images or []) >= max_references:
                     raise ValueError(
                         f"Conversation history plus reference_images exceeds the {model_id} "
