@@ -65,7 +65,7 @@ class TestServerImports:
         from imagen_mcp import __version__
         from imagen_mcp.server import mcp
 
-        assert __version__ == "0.4.0"
+        assert __version__ == "0.5.0"
         assert OpenAIProvider is not None
         assert mcp is not None
 

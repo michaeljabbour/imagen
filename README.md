@@ -1,20 +1,26 @@
-# imagen-mcp
+# imagen
 
 A Model Context Protocol (MCP) server for intelligent multi-provider image generation.
 
-[![CI](https://github.com/michaeljabbour/imagen-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/michaeljabbour/imagen-mcp/actions/workflows/ci.yml)
+[![CI](https://github.com/michaeljabbour/imagen/actions/workflows/ci.yml/badge.svg)](https://github.com/michaeljabbour/imagen/actions/workflows/ci.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## Quick Start
 
-Version 0.4.0 is released as the immutable `v0.4.0` Git tag and is not
+> This project was renamed from `imagen-mcp` to `imagen`
+> (`michaeljabbour/imagen-mcp` -> `michaeljabbour/imagen`; the old GitHub URL
+> redirects). The MCP server executable (`imagen-mcp`) and its `imagen_mcp`
+> Python package name are unchanged -- only the project/distribution name and
+> the smart-tool CLI (`imagen-mcp-smart` -> `imagen`) changed.
+
+Version 0.5.0 is released as the immutable `v0.5.0` Git tag and is not
 published on PyPI. Install it from that tag or a local checkout, then run the
 canonical module or console script:
 
 ```bash
-git clone https://github.com/michaeljabbour/imagen-mcp.git
-cd imagen-mcp
+git clone https://github.com/michaeljabbour/imagen.git
+cd imagen
 python3 -m pip install .
 python -m imagen_mcp
 # equivalent after installation: imagen-mcp
@@ -24,7 +30,7 @@ For a reproducible VCS install, use the release tag:
 
 ```bash
 python3 -m pip install \
-  "imagen-mcp @ git+https://github.com/michaeljabbour/imagen-mcp.git@v0.4.0"
+  "imagen @ git+https://github.com/michaeljabbour/imagen.git@v0.5.0"
 ```
 
 The historical `python -m src.server` entry point remains available for
@@ -310,7 +316,7 @@ flowchart TB
         CX[Codex CLI]
     end
 
-    subgraph Server["imagen-mcp Server"]
+    subgraph Server["imagen MCP Server"]
         MCP[MCP Protocol Layer]
 
         subgraph Tools["MCP Tools"]
@@ -404,8 +410,8 @@ python3 -c "from imagen_mcp.providers import get_provider_registry; print(get_pr
 
 ```bash
 # Clone and install (runtime + dev tooling)
-git clone https://github.com/michaeljabbour/imagen-mcp.git
-cd imagen-mcp
+git clone https://github.com/michaeljabbour/imagen.git
+cd imagen
 pip install -e ".[dev]"          # or: uv sync --extra dev
 
 # Install pre-commit hooks (ruff + mypy)
@@ -431,7 +437,7 @@ tail -f ~/Library/Logs/Claude/mcp-server-imagen.log
 ## Project Structure
 
 ```
-imagen-mcp/
+imagen/
 ├── imagen_mcp/               # Canonical package namespace + module runner
 ├── src/
 │   ├── server.py              # Implementation + legacy import path

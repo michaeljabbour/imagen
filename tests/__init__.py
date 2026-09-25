@@ -1,1 +1,1 @@
-"""Tests for imagen-mcp."""
+"""Tests for imagen."""

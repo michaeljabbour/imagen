@@ -17,7 +17,7 @@ from src.smart_tool import lib
 
 def test_manifest_returns_frontmatter_and_body():
     result = lib.manifest()
-    assert result["frontmatter"]["name"] == "imagen-mcp"
+    assert result["frontmatter"]["name"] == "imagen"
     assert result["frontmatter"]["smart_tool_format"] == 1
     assert "imagen-mcp" in result["body"]
 

@@ -1,4 +1,4 @@
-# Pre-commit hooks for imagen-mcp.
+# Pre-commit hooks for imagen.
 # Install with: pre-commit install   (after `pip install -e ".[dev]"`)
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit

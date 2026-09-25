@@ -1,4 +1,4 @@
-"""Smart-tool library capabilities for imagen-mcp.
+"""Smart-tool library capabilities for imagen.
 
 This is the actual capability surface (per the smart tools spec, "the
 library is the tool"). Every function here is a plain async function
@@ -37,6 +37,11 @@ from . import model_resolution
 _PACKAGED_MD_PATH = Path(__file__).resolve().parent / "SMART_TOOL.md"
 _REPO_ROOT_MD_PATH = Path(__file__).resolve().parent.parent.parent / "SMART_TOOL.md"
 _SMART_TOOL_MD_PATH = _PACKAGED_MD_PATH if _PACKAGED_MD_PATH.is_file() else _REPO_ROOT_MD_PATH
+# Intentionally NOT renamed: this is the macOS Keychain service prefix under
+# which users already have API keys stored (dev.imagen-mcp.OPENAI_API_KEY /
+# dev.imagen-mcp.GEMINI_API_KEY). Changing it would orphan existing stored
+# keys, so it stays pinned to the pre-rename name even though the project
+# and distribution are now called "imagen".
 _KEYCHAIN_SERVICE_PREFIX = "dev.imagen-mcp"
 
 

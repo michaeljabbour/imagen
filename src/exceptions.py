@@ -1,4 +1,4 @@
-"""Custom exception hierarchy for imagen-mcp.
+"""Custom exception hierarchy for imagen.
 
 Provides structured, user-safe error handling with provider context
 and MCP error code mapping.
@@ -23,7 +23,7 @@ def _sanitize_message(msg: str) -> str:
 
 
 class ImagenError(Exception):
-    """Base exception for imagen-mcp."""
+    """Base exception for imagen."""
 
     def __init__(self, message: str, *, user_message: str | None = None) -> None:
         super().__init__(message)

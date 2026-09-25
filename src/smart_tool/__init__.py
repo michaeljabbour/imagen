@@ -1,4 +1,4 @@
-"""Smart-tool surface for imagen-mcp: model-agnostic image generation.
+"""Smart-tool surface for imagen: model-agnostic image generation.
 
 This package is an additional adapter over the existing ``src.providers``
 library (per the Amplifier Smart Tools spec: "the library is the tool").

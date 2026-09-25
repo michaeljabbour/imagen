@@ -1,5 +1,5 @@
 """
-Provider registry for imagen-mcp.
+Provider registry for imagen.
 
 Manages provider instances and provides factory methods
 for creating and accessing providers.

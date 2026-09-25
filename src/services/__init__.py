@@ -1,1 +1,1 @@
-"""Services module for imagen-mcp."""
+"""Services module for imagen."""

@@ -1,5 +1,5 @@
 """
-Settings management for imagen-mcp.
+Settings management for imagen.
 
 Handles API keys and configuration from environment variables.
 """

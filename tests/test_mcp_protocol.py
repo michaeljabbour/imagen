@@ -43,7 +43,7 @@ async def test_tool_failures_set_mcp_is_error(tmp_path):
             ) as session:
                 initialization = await session.initialize()
                 assert initialization.serverInfo.name == "imagen_mcp"
-                assert initialization.serverInfo.version == "0.4.0"
+                assert initialization.serverInfo.version == "0.5.0"
 
                 generation = await session.call_tool(
                     "generate_image",

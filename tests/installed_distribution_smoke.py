@@ -1,4 +1,4 @@
-"""Smoke an installed imagen-mcp artifact outside the source checkout."""
+"""Smoke an installed imagen artifact outside the source checkout."""
 
 from __future__ import annotations
 
@@ -17,8 +17,8 @@ from mcp.client.stdio import stdio_client
 
 def assert_distribution_metadata() -> None:
     """Confirm release metadata survived artifact construction."""
-    installed = distribution("imagen-mcp")
-    assert installed.version == "0.4.0"
+    installed = distribution("imagen")
+    assert installed.version == "0.5.0"
     assert installed.metadata["License-Expression"] == "MIT"
     assert any(str(file).endswith("licenses/LICENSE") for file in (installed.files or ()))
 
@@ -72,7 +72,7 @@ async def assert_stdio_server() -> None:
                     tools = await session.list_tools()
 
         assert initialized.serverInfo.name == "imagen_mcp"
-        assert initialized.serverInfo.version == "0.4.0"
+        assert initialized.serverInfo.version == "0.5.0"
         assert "generate_image" in {tool.name for tool in tools.tools}
 
 

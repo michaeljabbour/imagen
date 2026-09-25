@@ -1,4 +1,4 @@
-"""Models module for imagen-mcp."""
+"""Models module for imagen."""
 
 from .input_models import (
     ConversationalImageInput,

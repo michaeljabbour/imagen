@@ -3,8 +3,8 @@ requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "imagen-mcp"
-version = "0.4.0"
+name = "imagen"
+version = "0.5.0"
 authors = [
   { name = "Michael J. Jabbour" },
 ]
@@ -36,10 +36,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/michaeljabbour/imagen-mcp"
-Repository = "https://github.com/michaeljabbour/imagen-mcp.git"
-Issues = "https://github.com/michaeljabbour/imagen-mcp/issues"
-Changelog = "https://github.com/michaeljabbour/imagen-mcp/blob/v0.4.0/CHANGELOG.md"
+Homepage = "https://github.com/michaeljabbour/imagen"
+Repository = "https://github.com/michaeljabbour/imagen.git"
+Issues = "https://github.com/michaeljabbour/imagen/issues"
+Changelog = "https://github.com/michaeljabbour/imagen/blob/v0.5.0/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = [
@@ -57,7 +57,7 @@ dev = [
 [project.scripts]
 imagen-mcp = "imagen_mcp.server:main"
 imagen-mcp-cli = "imagen_mcp.cli:main"
-imagen-mcp-smart = "src.smart_tool.cli:main"
+imagen = "src.smart_tool.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["imagen_mcp*", "src*"]

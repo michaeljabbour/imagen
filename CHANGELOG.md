@@ -2,15 +2,34 @@
 
 ## Unreleased
 
+## 0.5.0 - 2026-09-25
+
+### Changed
+
+- Renamed the project and PyPI/git distribution from `imagen-mcp` to
+  `imagen` (GitHub repo: `michaeljabbour/imagen`, redirected from
+  `michaeljabbour/imagen-mcp`). The smart-tool CLI is now installed as
+  `imagen` (was `imagen-mcp-smart`). Install with:
+  `uv tool install "git+https://github.com/michaeljabbour/imagen@main"`.
+  The MCP server entry points (`imagen-mcp`, `imagen-mcp-cli`) and the
+  `imagen_mcp` Python package name are unchanged -- `imagen-mcp` names the
+  MCP server executable itself, not the project. The smart tool's config
+  and cache files move to `~/.config/imagen/models.yaml` and
+  `~/.cache/imagen/model_discovery_cache.json`; reads fall back to the old
+  `~/.config/imagen-mcp/` and `~/.cache/imagen-mcp/` locations when the new
+  paths do not yet exist. macOS Keychain service names
+  (`dev.imagen-mcp.OPENAI_API_KEY` / `dev.imagen-mcp.GEMINI_API_KEY`) are
+  unchanged so existing stored keys keep working.
+
 ### Added
 
 - Amplifier Smart Tool surface (`src/smart_tool/`, `SMART_TOOL.md`,
-  `smart-tool.json`): a `imagen-mcp-smart` CLI/library exposing
+  `smart-tool.json`): an `imagen` CLI/library exposing
   `generate-image`, `edit-image`, `list-providers`, and `estimate-cost`,
   reusing the existing `src.providers` code -- no generation logic is
   reimplemented. Passes the spec's 16-rule conformance kit.
 - Model-agnostic resolution (`src/smart_tool/model_resolution.py`): explicit
-  choice > a user-editable `~/.config/imagen-mcp/models.yaml` (aliases plus
+  choice > a user-editable `~/.config/imagen/models.yaml` (aliases plus
   `openai`/`gemini: latest`) > live discovery of the newest model from each
   provider's own models API > a cached last-known-good > a hardcoded
   fallback. `OpenAIProvider._resolve_model` / `GeminiProvider._resolve_model_id`

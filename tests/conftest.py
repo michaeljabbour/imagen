@@ -1,4 +1,4 @@
-"""Shared pytest fixtures for the imagen-mcp test suite.
+"""Shared pytest fixtures for the imagen test suite.
 
 The single most important fixture here is ``fake_env`` (autouse): it gives
 every test a deterministic environment with both provider API keys present

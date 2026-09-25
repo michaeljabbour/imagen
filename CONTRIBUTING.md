@@ -1,4 +1,4 @@
-# Contributing to imagen-mcp
+# Contributing to imagen
 
 Thank you for your interest in contributing!
 
@@ -6,8 +6,8 @@ Thank you for your interest in contributing!
 
 1.  **Clone the repository**:
     ```bash
-    git clone https://github.com/michaeljabbour/imagen-mcp.git
-    cd imagen-mcp
+    git clone https://github.com/michaeljabbour/imagen.git
+    cd imagen
     ```
 
 2.  **Create and activate a virtual environment**:

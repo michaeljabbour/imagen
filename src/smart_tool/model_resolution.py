@@ -1,4 +1,4 @@
-"""Model-agnostic resolution for the imagen-mcp smart tool.
+"""Model-agnostic resolution for the imagen smart tool.
 
 Resolves *which* provider model id to call, in this order:
 
@@ -17,8 +17,10 @@ Resolves *which* provider model id to call, in this order:
    failure degrades to the most recent successful answer, and only then to
    the provider's own hardcoded default.
 
-Config file: ``~/.config/imagen-mcp/models.yaml`` (override with the
-``IMAGEN_MCP_MODELS_CONFIG`` env var), parsed with ``yaml.safe_load``:
+Config file: ``~/.config/imagen/models.yaml`` (override with the
+``IMAGEN_MCP_MODELS_CONFIG`` env var), parsed with ``yaml.safe_load``. Falls
+back to the pre-rename ``~/.config/imagen-mcp/models.yaml`` location for
+reads when the new path does not exist:
 
     openai: latest
     gemini: latest
@@ -26,8 +28,10 @@ Config file: ``~/.config/imagen-mcp/models.yaml`` (override with the
       fast: gemini-3.1-flash-lite-image
       quality: gpt-image-2
 
-Discovery cache: ``~/.cache/imagen-mcp/model_discovery_cache.json`` (override
-with ``IMAGEN_MCP_DISCOVERY_CACHE``).
+Discovery cache: ``~/.cache/imagen/model_discovery_cache.json`` (override
+with ``IMAGEN_MCP_DISCOVERY_CACHE``). Also falls back to the pre-rename
+``~/.cache/imagen-mcp/model_discovery_cache.json`` for reads; new writes
+always target the new location.
 """
 
 from __future__ import annotations
@@ -66,10 +70,23 @@ _HARDCODED_FALLBACK = {
 
 
 def default_config_path() -> Path:
+    """Resolve the model config path.
+
+    Prefers the post-rename ``~/.config/imagen/models.yaml`` location; falls
+    back to the pre-rename ``~/.config/imagen-mcp/models.yaml`` for reads
+    when only the old path exists (e.g. on a machine that has not yet
+    migrated).
+    """
     override = os.environ.get("IMAGEN_MCP_MODELS_CONFIG")
     if override:
         return Path(override).expanduser()
-    return Path.home() / ".config" / "imagen-mcp" / "models.yaml"
+    new_path = Path.home() / ".config" / "imagen" / "models.yaml"
+    if new_path.is_file():
+        return new_path
+    old_path = Path.home() / ".config" / "imagen-mcp" / "models.yaml"
+    if old_path.is_file():
+        return old_path
+    return new_path
 
 
 def load_config(config_path: Path | str | None = None) -> dict[str, Any]:
@@ -90,15 +107,38 @@ def load_config(config_path: Path | str | None = None) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _cache_path() -> Path:
-    override = os.environ.get("IMAGEN_MCP_DISCOVERY_CACHE")
-    if override:
-        return Path(override).expanduser()
+def _new_cache_path() -> Path:
+    return Path.home() / ".cache" / "imagen" / "model_discovery_cache.json"
+
+
+def _old_cache_path() -> Path:
     return Path.home() / ".cache" / "imagen-mcp" / "model_discovery_cache.json"
 
 
+def _cache_read_path() -> Path:
+    """Resolve the cache path for reads, falling back to the pre-rename location."""
+    override = os.environ.get("IMAGEN_MCP_DISCOVERY_CACHE")
+    if override:
+        return Path(override).expanduser()
+    new_path = _new_cache_path()
+    if new_path.is_file():
+        return new_path
+    old_path = _old_cache_path()
+    if old_path.is_file():
+        return old_path
+    return new_path
+
+
+def _cache_write_path() -> Path:
+    """Resolve the cache path for writes -- always the post-rename location."""
+    override = os.environ.get("IMAGEN_MCP_DISCOVERY_CACHE")
+    if override:
+        return Path(override).expanduser()
+    return _new_cache_path()
+
+
 def _read_cache() -> dict[str, Any]:
-    path = _cache_path()
+    path = _cache_read_path()
     if not path.is_file():
         return {}
     try:
@@ -109,7 +149,7 @@ def _read_cache() -> dict[str, Any]:
 
 
 def _write_cache(data: dict[str, Any]) -> None:
-    path = _cache_path()
+    path = _cache_write_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")

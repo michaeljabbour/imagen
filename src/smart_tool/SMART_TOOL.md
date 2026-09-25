@@ -1,7 +1,7 @@
 ---
 smart_tool_format: 1
-name: imagen-mcp
-version: 0.4.0
+name: imagen
+version: 0.5.0
 description: >
   Model-agnostic multi-provider image generation and editing (OpenAI and
   Google Gemini). Use when an agent needs to generate, edit, or estimate the
@@ -26,14 +26,14 @@ requires:
     install: README.md#credentials
 ---
 
-# imagen-mcp (smart tool)
+# imagen (smart tool)
 
 Generates and edits images through OpenAI's gpt-image family and Google's
 Gemini image family, picking a model automatically so it keeps working when
 either provider ships a new one -- no code edits, no version pins to update.
 
 **The library is the tool.** `src.smart_tool.lib` holds every capability; the
-CLI (`imagen-mcp-smart`) is a thin wrapper that parses arguments, calls the
+CLI (`imagen`) is a thin wrapper that parses arguments, calls the
 library, and prints JSON. Every deterministic capability
 (`manifest`, `list-providers`, `estimate-cost`) runs with no provider
 credential configured. The model-backed capabilities (`generate-image`,
@@ -65,8 +65,10 @@ For each provider, in order:
 1. **Explicit choice** -- the `model=` argument, when given, is used as-is.
    An unrecognized id is *not* rejected by this tool; the provider's own API
    validates it.
-2. **Config file** -- `~/.config/imagen-mcp/models.yaml`
-   (override with `IMAGEN_MCP_MODELS_CONFIG`):
+2. **Config file** -- `~/.config/imagen/models.yaml`
+   (override with `IMAGEN_MCP_MODELS_CONFIG`; falls back to the pre-rename
+   `~/.config/imagen-mcp/models.yaml` for reads if the new path doesn't
+   exist):
 
    ```yaml
    openai: latest
@@ -83,7 +85,8 @@ For each provider, in order:
    (`GET /v1/models` for OpenAI, `models.list` for Gemini), filters to the
    image-capable family, and picks the newest by parsed version (and, for
    OpenAI, `created` timestamp). The result is cached
-   (`~/.cache/imagen-mcp/model_discovery_cache.json`) so a later failure
+   (`~/.cache/imagen/model_discovery_cache.json`, also falling back to the
+   pre-rename `~/.cache/imagen-mcp/` cache for reads) so a later failure
    falls back to the last successful discovery, then to a hardcoded default
    (`gpt-image-2` / `gemini-3.1-flash-image`).
 
@@ -97,18 +100,18 @@ must be requested by an explicit `model=`.
 
 ```bash
 # Deterministic -- no credentials needed
-imagen-mcp-smart manifest
-imagen-mcp-smart list-providers
-imagen-mcp-smart estimate-cost --provider openai --size 1024x1024 --quality medium
+imagen manifest
+imagen list-providers
+imagen estimate-cost --provider openai --size 1024x1024 --quality medium
 
 # Model-backed -- needs OPENAI_API_KEY and/or GEMINI_API_KEY
-imagen-mcp-smart generate-image "a cozy coffee shop, morning light" --size 1024x1024
-imagen-mcp-smart generate-image "professional headshot" --provider gemini
-imagen-mcp-smart edit-image "add a rainbow" ./photo.png --output-path ./edited.png
+imagen generate-image "a cozy coffee shop, morning light" --size 1024x1024
+imagen generate-image "professional headshot" --provider gemini
+imagen edit-image "add a rainbow" ./photo.png --output-path ./edited.png
 ```
 
 Each capability's own `--help` documents its arguments, result shape, and
-failures in full (`imagen-mcp-smart generate-image --help`).
+failures in full (`imagen generate-image --help`).
 
 ## Sharp edges
 
