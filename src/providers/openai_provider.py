@@ -182,13 +182,30 @@ class OpenAIProvider(ImageProvider):
             api_key = settings.get_openai_api_key()
         return api_key
 
-    def _resolve_model(self, openai_model: str | None) -> str:
-        """Resolve and strictly validate an Image API model identifier."""
+    def _resolve_model(self, openai_model: str | None, *, allow_unknown: bool = False) -> str:
+        """Resolve an Image API model identifier.
+
+        Strictly validates against the known ``OPENAI_IMAGE_MODELS`` registry
+        by default, so a typo never silently bills a different model. Callers
+        that already resolved ``openai_model`` themselves (explicit user
+        choice, or a model discovered live from OpenAI's own models API --
+        see ``src.smart_tool.model_resolution``) may pass
+        ``allow_unknown=True`` to pass an unrecognized id through unchanged,
+        deferring rejection to the API itself. This keeps the MCP server's
+        default behavior unchanged while letting the smart tool stay
+        model-agnostic.
+        """
         if not openai_model:
             return DEFAULT_OPENAI_IMAGE_MODEL
         try:
             return OPENAI_IMAGE_MODELS[openai_model]
         except KeyError as exc:
+            if allow_unknown:
+                logger.info(
+                    "Passing unrecognized OpenAI image model '%s' through to the API.",
+                    openai_model,
+                )
+                return openai_model
             supported = ", ".join(OPENAI_IMAGE_MODELS)
             raise ValueError(
                 f"Unsupported OpenAI image model '{openai_model}'. Supported: {supported}."
@@ -778,7 +795,10 @@ class OpenAIProvider(ImageProvider):
                 f"Prompt too long. Maximum {OPENAI_MAX_PROMPT_LENGTH} characters for OpenAI."
             )
 
-        model = self._resolve_model(kwargs.get("openai_model") or kwargs.get("model"))
+        model = self._resolve_model(
+            kwargs.get("openai_model") or kwargs.get("model"),
+            allow_unknown=bool(kwargs.get("allow_unknown_model", False)),
+        )
 
         # --- Size ---
         if size:
@@ -979,6 +999,7 @@ class OpenAIProvider(ImageProvider):
         moderation: str | None = None,
         style: str | None = None,
         n: int | None = None,
+        allow_unknown_model: bool = False,
         **kwargs: Any,
     ) -> ImageResult:
         """Generate an image using OpenAI gpt-image-2."""
@@ -986,7 +1007,7 @@ class OpenAIProvider(ImageProvider):
         image_model = openai_model or DEFAULT_OPENAI_IMAGE_MODEL
 
         try:
-            image_model = self._resolve_model(openai_model)
+            image_model = self._resolve_model(openai_model, allow_unknown=allow_unknown_model)
             api_key = self._get_api_key(api_key)
 
             # Validate and normalize
@@ -1002,6 +1023,7 @@ class OpenAIProvider(ImageProvider):
                 style=style,
                 n=n,
                 model=image_model,
+                allow_unknown_model=allow_unknown_model,
             )
             size = str(validated["size"])
             quality = validated.get("quality", quality)
@@ -1255,6 +1277,7 @@ class OpenAIProvider(ImageProvider):
         openai_model: str | None = None,
         api_key: str | None = None,
         output_path: str | None = None,
+        allow_unknown_model: bool = False,
     ) -> ImageResult:
         """Edit an image via /images/edits with a GPT Image model.
 
@@ -1267,7 +1290,7 @@ class OpenAIProvider(ImageProvider):
         image_model = openai_model or DEFAULT_OPENAI_IMAGE_MODEL
 
         try:
-            image_model = self._resolve_model(openai_model)
+            image_model = self._resolve_model(openai_model, allow_unknown=allow_unknown_model)
             api_key = self._get_api_key(api_key)
 
             # gpt-image-2 supports the same constrained arbitrary sizes for
