@@ -63,7 +63,7 @@ imagen-mcp-smart = "src.smart_tool.cli:main"
 include = ["imagen_mcp*", "src*"]
 
 [tool.setuptools.package-data]
-src = ["py.typed"]
+src = ["py.typed", "smart_tool/SMART_TOOL.md"]
 imagen_mcp = ["py.typed"]
 
 [tool.ruff]
