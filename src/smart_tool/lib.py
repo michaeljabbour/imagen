@@ -30,7 +30,13 @@ from src.providers.selector import ProviderSelector
 
 from . import model_resolution
 
-_SMART_TOOL_MD_PATH = Path(__file__).resolve().parent.parent.parent / "SMART_TOOL.md"
+# The repo-root SMART_TOOL.md is canonical (the spec's distribution root);
+# an identical copy ships inside the package so an installed tool (uv tool
+# install / pip install, where the repo root does not exist) can still render
+# its manifest. tests/test_smart_tool_manifest_packaging.py guards drift.
+_PACKAGED_MD_PATH = Path(__file__).resolve().parent / "SMART_TOOL.md"
+_REPO_ROOT_MD_PATH = Path(__file__).resolve().parent.parent.parent / "SMART_TOOL.md"
+_SMART_TOOL_MD_PATH = _PACKAGED_MD_PATH if _PACKAGED_MD_PATH.is_file() else _REPO_ROOT_MD_PATH
 _KEYCHAIN_SERVICE_PREFIX = "dev.imagen-mcp"
 
 
