@@ -1,4 +1,4 @@
-"""Smoke tests for the imagen-mcp-smart CLI (thin wrapper over lib)."""
+"""Smoke tests for the imagen CLI (thin wrapper over lib)."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ def test_manifest_capability_runs_deterministically(capsys):
     exit_code = cli.main(["manifest"])
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["frontmatter"]["name"] == "imagen-mcp"
+    assert payload["frontmatter"]["name"] == "imagen"
 
 
 def test_list_providers_capability(capsys):
@@ -27,7 +27,7 @@ def test_top_level_help_renders_skill(capsys):
     exit_code = cli.main(["--help"])
     assert exit_code == 0
     out = capsys.readouterr().out
-    assert '<skill_content name="imagen-mcp">' in out
+    assert '<skill_content name="imagen">' in out
     assert "## Capabilities" in out
 
 

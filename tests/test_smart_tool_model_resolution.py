@@ -231,3 +231,80 @@ async def test_successful_discovery_is_cached_for_next_call(tmp_path):
     assert cache_path.is_file()
     cached = json.loads(cache_path.read_text())
     assert cached["openai"]["model"] == "gpt-image-2"
+
+
+# ---------------------------------------------------------------------------
+# Post-rename path fallback (imagen-mcp -> imagen)
+#
+# The autouse `_isolated_paths` fixture above sets the env var overrides for
+# every other test in this file; these tests explicitly unset them to
+# exercise the actual default (non-override) path resolution, which is where
+# the pre-rename fallback logic lives.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _fake_home(tmp_path, monkeypatch):
+    """Unset the config/cache env overrides and point Path.home() at a temp dir."""
+    monkeypatch.delenv("IMAGEN_MCP_MODELS_CONFIG", raising=False)
+    monkeypatch.delenv("IMAGEN_MCP_DISCOVERY_CACHE", raising=False)
+    monkeypatch.setattr(mr.Path, "home", classmethod(lambda cls: tmp_path))
+    return tmp_path
+
+
+def test_default_config_path_prefers_new_location_when_both_exist(_fake_home):
+    new_path = _fake_home / ".config" / "imagen" / "models.yaml"
+    old_path = _fake_home / ".config" / "imagen-mcp" / "models.yaml"
+    new_path.parent.mkdir(parents=True)
+    old_path.parent.mkdir(parents=True)
+    new_path.write_text("openai: latest\n")
+    old_path.write_text("openai: latest\n")
+    assert mr.default_config_path() == new_path
+
+
+def test_default_config_path_falls_back_to_old_location(_fake_home):
+    old_path = _fake_home / ".config" / "imagen-mcp" / "models.yaml"
+    old_path.parent.mkdir(parents=True)
+    old_path.write_text("openai: gpt-image-1\n")
+    assert mr.default_config_path() == old_path
+    # And the fallback is actually readable end-to-end.
+    assert mr.load_config() == {"openai": "gpt-image-1"}
+
+
+def test_default_config_path_prefers_new_location_when_neither_exists(_fake_home):
+    new_path = _fake_home / ".config" / "imagen" / "models.yaml"
+    assert mr.default_config_path() == new_path
+
+
+def test_cache_read_path_falls_back_to_old_location(_fake_home):
+    old_path = _fake_home / ".cache" / "imagen-mcp" / "model_discovery_cache.json"
+    old_path.parent.mkdir(parents=True)
+    old_path.write_text(json.dumps({"openai": {"model": "gpt-image-1", "ts": 1_700_000_000.0}}))
+    assert mr._cache_read_path() == old_path
+    assert mr._read_cache()["openai"]["model"] == "gpt-image-1"
+
+
+def test_cache_read_path_prefers_new_location_when_both_exist(_fake_home):
+    new_path = _fake_home / ".cache" / "imagen" / "model_discovery_cache.json"
+    old_path = _fake_home / ".cache" / "imagen-mcp" / "model_discovery_cache.json"
+    new_path.parent.mkdir(parents=True)
+    old_path.parent.mkdir(parents=True)
+    new_path.write_text(json.dumps({"openai": {"model": "gpt-image-2", "ts": 1_700_000_000.0}}))
+    old_path.write_text(json.dumps({"openai": {"model": "gpt-image-1", "ts": 1_700_000_000.0}}))
+    assert mr._cache_read_path() == new_path
+    assert mr._read_cache()["openai"]["model"] == "gpt-image-2"
+
+
+def test_cache_write_path_always_targets_new_location_even_if_old_exists(_fake_home):
+    old_path = _fake_home / ".cache" / "imagen-mcp" / "model_discovery_cache.json"
+    old_path.parent.mkdir(parents=True)
+    old_path.write_text(json.dumps({"openai": {"model": "gpt-image-1", "ts": 1_700_000_000.0}}))
+
+    new_path = _fake_home / ".cache" / "imagen" / "model_discovery_cache.json"
+    assert mr._cache_write_path() == new_path
+
+    mr._write_cache({"gemini": {"model": "gemini-3.1-flash-image", "ts": 1_700_000_001.0}})
+    assert new_path.is_file()
+    # The old file is untouched by the write.
+    old_contents = json.loads(old_path.read_text())
+    assert old_contents == {"openai": {"model": "gpt-image-1", "ts": 1_700_000_000.0}}

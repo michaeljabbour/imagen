@@ -30,14 +30,14 @@ def _render_skill() -> str:
     data = lib.manifest()
     frontmatter = data["frontmatter"]
     lines = [
-        f'<skill_content name="{frontmatter.get("name", "imagen-mcp")}">',
-        f"Repository: {frontmatter.get('repository', 'https://github.com/michaeljabbour/imagen-mcp')}",
+        f'<skill_content name="{frontmatter.get("name", "imagen")}">',
+        f"Repository: {frontmatter.get('repository', 'https://github.com/michaeljabbour/imagen')}",
         "",
         data["body"],
         "",
         "## Capabilities",
         "",
-        "Each has its own skill: `imagen-mcp-smart <capability> --help`.",
+        "Each has its own skill: `imagen <capability> --help`.",
         "",
     ]
     for name, (summary, model_backed) in _CAPABILITIES.items():
@@ -54,7 +54,7 @@ def _print_json(payload: Any) -> None:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="imagen-mcp-smart",
+        prog="imagen",
         description="Model-agnostic multi-provider image generation (smart tool).",
     )
     subparsers = parser.add_subparsers(dest="capability")

@@ -1,5 +1,5 @@
 """
-Integration tests for imagen-mcp with mocked API responses.
+Integration tests for imagen with mocked API responses.
 
 Tests full flow from MCP tools through provider selection to image generation,
 using mocked HTTP responses to avoid actual API calls.

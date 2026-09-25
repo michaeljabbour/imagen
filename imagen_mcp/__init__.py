@@ -1,4 +1,4 @@
-"""Canonical package namespace for imagen-mcp."""
+"""Canonical package namespace for imagen (module name unchanged: imagen_mcp)."""
 
 from src import __version__
 

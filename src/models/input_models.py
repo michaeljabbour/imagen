@@ -1,5 +1,5 @@
 """
-Pydantic input models for imagen-mcp tools.
+Pydantic input models for imagen tools.
 
 These models define the parameters accepted by MCP tools
 with rich descriptions for Claude to understand how to use them.

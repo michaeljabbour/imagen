@@ -1,5 +1,5 @@
 """
-Constants for imagen-mcp providers.
+Constants for imagen providers.
 
 This module defines provider-specific constants including supported sizes,
 aspect ratios, quality tiers, and model identifiers.

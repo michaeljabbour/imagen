@@ -1,5 +1,5 @@
 {
   "manifest": "SMART_TOOL.md",
-  "cli_argv": ["imagen-mcp-smart"],
+  "cli_argv": ["imagen"],
   "deterministic_smoke": ["manifest"]
 }

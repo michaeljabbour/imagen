@@ -1,5 +1,5 @@
 """
-Provider selection logic for imagen-mcp.
+Provider selection logic for imagen.
 
 Analyzes prompts and requirements to recommend the best provider
 for each image generation task.
